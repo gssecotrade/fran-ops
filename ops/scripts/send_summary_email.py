@@ -1,0 +1,1 @@
+print('Email resumen placeholder')

@@ -1,0 +1,1 @@
+Loterías app placeholder.

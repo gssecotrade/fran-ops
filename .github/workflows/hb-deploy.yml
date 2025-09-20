@@ -1,0 +1,3 @@
+name: HB Deploy
+on: {push: {branches: [ main ], paths: ['hb/frontend/**']}}
+jobs: {b:{runs-on: ubuntu-latest, steps:[{uses:'actions/checkout@v4'},{uses:'actions/setup-node@v4',with:{node-version:'20'}},{name:'Install',run:'cd hb/frontend && npm ci || true'},{name:'Build',run:'cd hb/frontend && npm run build --if-present'},{name:'Zip',run:'mkdir -p dist && cd hb/frontend && zip -rq ../../dist/hb_frontend_$(date +%Y%m%d_%H%M).zip .'},{uses:'actions/upload-artifact@v4',with:{name:'hb_frontend_zip',path:'dist/*.zip'}}]}}
