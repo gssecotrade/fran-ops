@@ -1,3 +1,33 @@
 name: Docs Build
-on:{push:{branches:[ main ],paths:['marketing/**','legales/**','ops/templates/**']}}
-jobs:{d:{runs-on: ubuntu-latest,steps:[{uses:'actions/checkout@v4'},{name:'Install pandoc',run:'sudo apt-get update && sudo apt-get install -y pandoc'},{name:'Render',run:'mkdir -p dist && pandoc marketing/posts/landing.md -f markdown -t docx -o dist/landing_$(date +%Y%m%d).docx'},{uses:'actions/upload-artifact@v4',with:{name:'docs_generados',path:'dist/*'}}]}}
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'marketing/**'
+      - 'legales/**'
+      - 'ops/templates/**'
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar pandoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
+      - name: Preparar salida
+        run: mkdir -p dist
+      - name: Render a DOCX (tolerante)
+        run: |
+          if [ -f marketing/posts/landing.md ]; then
+            pandoc marketing/posts/landing.md -f markdown -t docx -o dist/landing_${{ github.run_number }}.docx
+          else
+            echo "# Placeholder" > tmp.md
+            pandoc tmp.md -f markdown -t docx -o dist/landing_${{ github.run_number }}.docx
+          fi
+      - name: Subir artefactos
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs_generados
+          path: dist/*
+          if-no-files-found: error

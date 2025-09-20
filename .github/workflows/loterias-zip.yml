@@ -1,3 +1,24 @@
 name: Loterias ZIP
-on: {push: {branches: [ main ], paths: ['loterias/**']}}
-jobs:{p:{runs-on: ubuntu-latest,steps:[{uses:'actions/checkout@v4'},{name:'Zip',run:'mkdir -p dist && zip -rq dist/loterias_$(date +%Y%m%d_%H%M).zip loterias'},{uses:'actions/upload-artifact@v4',with:{name:'loterias_zip',path:'dist/*.zip'}}]}}
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'loterias/**'
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Zip carpeta loterias
+        run: |
+          mkdir -p dist
+          if [ -d loterias ]; then
+            zip -rq dist/loterias_${{ github.run_number }}.zip loterias
+          else
+            echo "Sin carpeta loterias; nada que zipear"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loterias_zip
+          path: dist/*
+          if-no-files-found: warn

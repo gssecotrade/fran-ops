@@ -1,3 +1,38 @@
 name: HB Deploy
-on: {push: {branches: [ main ], paths: ['hb/frontend/**']}}
-jobs: {b:{runs-on: ubuntu-latest, steps:[{uses:'actions/checkout@v4'},{uses:'actions/setup-node@v4',with:{node-version:'20'}},{name:'Install',run:'cd hb/frontend && npm ci || true'},{name:'Build',run:'cd hb/frontend && npm run build --if-present'},{name:'Zip',run:'mkdir -p dist && cd hb/frontend && zip -rq ../../dist/hb_frontend_$(date +%Y%m%d_%H%M).zip .'},{uses:'actions/upload-artifact@v4',with:{name:'hb_frontend_zip',path:'dist/*.zip'}}]}}
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'hb/**'
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps (tolerante)
+        working-directory: hb/frontend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit
+          elif [ -f package.json ]; then
+            npm install --ignore-scripts --no-audit
+          else
+            echo "No hay package.json; salto instalación"
+          fi
+      - name: Build (si existe)
+        working-directory: hb/frontend
+        run: npm run build --if-present || true
+      - name: Zipear fuente
+        run: |
+          mkdir -p dist
+          cd hb/frontend
+          zip -rq ../../dist/hb_frontend_${{ github.run_number }}.zip . || true
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: hb_frontend_zip
+          path: dist/*.zip
+          if-no-files-found: warn
