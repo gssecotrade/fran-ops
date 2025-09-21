@@ -6,6 +6,7 @@ from datetime import datetime
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# Coge credenciales de los Secrets que ya pusimos en GitHub Actions
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -36,7 +37,6 @@ def build_summary():
 
     return "\n".join(lines)
 
-print("FLAG: SMTP REAL")
 def send_email(subject, body):
     if not (SMTP_USER and SMTP_PASS and SMTP_TO):
         print("⚠️ Falta SMTP_USER/SMTP_PASS/SMTP_TO en secrets")
