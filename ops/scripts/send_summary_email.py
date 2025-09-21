@@ -36,6 +36,7 @@ def build_summary():
 
     return "\n".join(lines)
 
+print("FLAG: SMTP REAL")
 def send_email(subject, body):
     if not (SMTP_USER and SMTP_PASS and SMTP_TO):
         print("⚠️ Falta SMTP_USER/SMTP_PASS/SMTP_TO en secrets")
