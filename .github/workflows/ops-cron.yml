@@ -1,18 +1,22 @@
 name: Fran Ops — Scheduler
+
 on:
-  workflow_dispatch:
+  workflow_dispatch:        # Lanzamiento manual
   schedule:
-    - cron: '0 6 * * *'   # 08:00 Madrid (cron usa UTC)
+    - cron: '0 6 * * *'     # 08:00 Madrid (cron usa UTC)
 
 jobs:
   run-ops:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # Restaura el Service Account JSON desde secret base64
       - name: Restore Service Account JSON
         env:
           GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
@@ -20,6 +24,7 @@ jobs:
           mkdir -p ops/.secrets
           echo "$GOOGLE_SA_JSON_BASE64" | base64 -d > ops/.secrets/google-sa.json
 
+      # (Opcional) Construye .env por si otros scripts lo usan
       - name: Create .env
         run: |
           cat > ops/.env <<'ENV'
@@ -38,10 +43,24 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install -r ops/scripts/requirements.txt
+          pip install -r ops/scripts/requirements.txt || true
           pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
+      # Ejecuta el pipeline con las variables de entorno correctas
       - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
+        env:
+          # SMTP / Email (desde Secrets)
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+          SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
+          # IDs/rutas para otros steps si los usan
+          SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GOOGLE_SA_JSON: ${{ github.workspace }}/ops/.secrets/google-sa.json
         run: |
           python ops/scripts/sheets_to_csv.py || true
           python ops/scripts/normalize_legales.py || true
