@@ -1,144 +1,156 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Normalización Loterías
-Lee CSVs desde loterias/data/, estandariza columnas/fechas/nulos,
-y guarda los resultados en dist/loterias/normalized/YYYY-MM-DD/.
-Genera además un manifest con metadatos (filas, hash, bytes).
-
-Diseñado para ser tolerante a formatos: coerciona errores y registra avisos.
-"""
-
 import os
-import sys
-import csv
-import json
+import glob
 import hashlib
-from datetime import datetime, date
-from pathlib import Path
-
+from datetime import datetime
 import pandas as pd
 
-BASE = Path(__file__).resolve().parents[2]
-DATA_DIR = BASE / "loterias" / "data"
-OUT_ROOT = BASE / "dist" / "loterias" / "normalized"
+BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DATA_DIR = os.path.join(BASE, "loterias", "data")
+NORM_DIR = os.path.join(BASE, "loterias", "normalized")
+DIST_DIR = os.path.join(BASE, "dist")
 
-# Fecha de “corte” para la carpeta de salida (hoy)
-TODAY = date.today().strftime("%Y-%m-%d")
-OUT_DIR = OUT_ROOT / TODAY
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+# Columnas “fecha” más probables en tus ficheros
+DATE_CANDIDATES = [
+    "fecha", "Fecha", "date", "fecha_sorteo", "fecha_compra",
+    "fecha_bono", "fecha_gordo", "fecha_euro", "created_at"
+]
 
-# Columnas que intentaremos interpretar como fecha
-DATE_CANDIDATES = {
-    "fecha", "date", "fecha_sorteo", "fecha_bono", "fecha_gordo",
-    "fecha_primitiva", "fecha_euromillones", "f_sorteo"
+# Tipado “suave” para mantener consistencia entre runs
+SCHEMA_HINT = {
+    "juego": "string",
+    "tipo": "string",
+    "bote": "float64",
+    "importe": "float64",
+    "premio": "float64",
+    "apuestas": "Int64",
+    "aciertos": "Int64",
+    "user_id": "string",
+    "email": "string",
+    "numero": "string",
+    "serie": "string",
+    "fraccion": "string",
 }
 
-def sha256_of_file(p: Path) -> str:
-    h = hashlib.sha256()
-    with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def ensure_dirs():
+    os.makedirs(NORM_DIR, exist_ok=True)
+    os.makedirs(DIST_DIR, exist_ok=True)
 
-def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    # Normalizar nombre de columnas
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-
-    # Strip a strings
-    for c in df.columns:
-        if pd.api.types.is_string_dtype(df[c]):
-            df[c] = df[c].astype("string").str.strip()
-
-    # Intento de estandarizar una columna de fecha si existe
-    date_cols = [c for c in df.columns if c in DATE_CANDIDATES]
-    if date_cols:
-        col = date_cols[0]
-        # intentamos con dayfirst True (formato dd/mm/yyyy habitual)
-        # y coercion de errores
+def read_csv_safely(path: str) -> pd.DataFrame:
+    # Maneja separador y encoding típicos sin reventar
+    for sep in [",", ";", "\t", "|"]:
         try:
-            df["fecha_estandar"] = pd.to_datetime(
-                df[col], errors="coerce", dayfirst=True
-            ).dt.date
+            df = pd.read_csv(path, sep=sep, engine="python")
+            if df.shape[1] > 1:
+                return df
         except Exception:
-            # fallback sin dayfirst por si acaso
-            df["fecha_estandar"] = pd.to_datetime(
-                df[col], errors="coerce"
-            ).dt.date
+            pass
+    # Último intento “normal”
+    return pd.read_csv(path)
 
-    # Relleno de NaNs coherente
-    df = df.fillna(pd.NA)
-
+def coerce_dates(df: pd.DataFrame) -> pd.DataFrame:
+    # Normaliza fechas sin warnings y con dayfirst=True (formato español)
+    for col in DATE_CANDIDATES:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", dayfirst=True)
+            # Añadimos una columna estandar si existe alguna fecha util
+            if "fecha_estandar" not in df.columns:
+                df["fecha_estandar"] = pd.NaT
+            df.loc[df[col].notna(), "fecha_estandar"] = df[col]
+    if "fecha_estandar" in df.columns:
+        # como date “limpio”
+        df["fecha_estandar"] = df["fecha_estandar"].dt.date
     return df
 
-def normalize_file(in_path: Path, out_path: Path) -> dict:
-    """Normaliza un CSV y lo escribe; devuelve metadatos para manifest."""
-    # Lectura tolerante
-    try:
-        # Primer intento: lectura “rápida”
-        df = pd.read_csv(in_path)
-    except Exception:
-        # Segundo intento: motor python, sep autodetect
-        try:
-            with in_path.open("r", newline="", encoding="utf-8") as fh:
-                sniffer = csv.Sniffer()
-                sample = fh.read(4096)
-                fh.seek(0)
-                delim = sniffer.sniff(sample).delimiter if sample else ","
-            df = pd.read_csv(in_path, engine="python", sep=delim, on_bad_lines="skip")
-        except Exception as e:
-            print(f"⚠️  No pude parsear {in_path.name}: {e}", file=sys.stderr)
-            # Creamos CSV vacío con cabecera “error”
-            out_path.write_text("error\nparser_failed\n", encoding="utf-8")
-            return {
-                "file": in_path.name,
-                "rows": 0,
-                "bytes": out_path.stat().st_size,
-                "sha256": sha256_of_file(out_path)
-            }
+def apply_schema_hint(df: pd.DataFrame) -> pd.DataFrame:
+    for col, dtype in SCHEMA_HINT.items():
+        if col in df.columns:
+            try:
+                if dtype == "string":
+                    df[col] = df[col].astype("string")
+                else:
+                    df[col] = df[col].astype(dtype)
+            except Exception:
+                # Si castea mal, lo dejamos tal cual para no romper
+                pass
+    return df
 
-    # Normalización
-    df_norm = normalize_df(df)
+def shortname(fname: str) -> str:
+    return os.path.splitext(os.path.basename(fname))[0]
 
-    # Escritura
-    df_norm.to_csv(out_path, index=False)
+def normalize_one(file_path: str) -> dict:
+    df = read_csv_safely(file_path)
+    df = coerce_dates(df)
+    df = apply_schema_hint(df)
+    # Orden estable de columnas: fecha_estandar primero si existe
+    cols = list(df.columns)
+    if "fecha_estandar" in cols:
+        cols = ["fecha_estandar"] + [c for c in cols if c != "fecha_estandar"]
+        df = df[cols]
 
-    return {
-        "file": in_path.name,
-        "rows": int(df_norm.shape[0]),
-        "bytes": out_path.stat().st_size,
-        "sha256": sha256_of_file(out_path),
+    out_csv = os.path.join(NORM_DIR, os.path.basename(file_path))
+    df.to_csv(out_csv, index=False)
+
+    meta = {
+        "file": os.path.basename(file_path),
+        "rows": len(df),
+        "cols": len(df.columns),
+        "out": out_csv,
     }
+    print(f"✓ Normalizado: {os.path.basename(file_path)} ({meta['rows']} filas)")
+    return meta
+
+def write_manifest(metas: list) -> str:
+    stamp = datetime.now().strftime("%Y%m%d")
+    manifest_path = os.path.join(DIST_DIR, f"loterias_manifest_{stamp}.csv")
+    mdf = pd.DataFrame(metas).sort_values("file")
+    mdf.to_csv(manifest_path, index=False)
+    return manifest_path
+
+def write_master(metas: list) -> tuple[str, str]:
+    # Concatena todo en un master.csv + master.parquet
+    frames = []
+    for m in metas:
+        try:
+            frames.append(pd.read_csv(m["out"]))
+        except Exception:
+            pass
+    if not frames:
+        return "", ""
+    master = pd.concat(frames, ignore_index=True)
+    master_csv = os.path.join(DIST_DIR, "loterias_master.csv")
+    master_parquet = os.path.join(DIST_DIR, "loterias_master.parquet")
+    master.to_csv(master_csv, index=False)
+    try:
+        master.to_parquet(master_parquet, index=False)
+    except Exception:
+        master_parquet = ""  # parquet opcional
+    return master_csv, master_parquet
 
 def main():
+    ensure_dirs()
     print("Normalización Loterías · inicio")
-    if not DATA_DIR.exists():
-        print(f"⚠️  {DATA_DIR} no existe; nada que normalizar")
-        return
+    csvs = sorted(glob.glob(os.path.join(DATA_DIR, "*.csv")))
+    metas = []
+    for fp in csvs:
+        try:
+            metas.append(normalize_one(fp))
+        except Exception as e:
+            print(f"⚠️  Error normalizando {os.path.basename(fp)}: {e}")
 
-    manifest = []
-    for csv_path in sorted(DATA_DIR.glob("*.csv")):
-        out_path = OUT_DIR / csv_path.name
-        meta = normalize_file(csv_path, out_path)
-        manifest.append(meta)
-        print(f"✓ Normalizado: {csv_path.name} ({meta['rows']} filas)")
+    manifest = write_manifest(metas) if metas else ""
+    master_csv, master_parquet = write_master(metas) if metas else ("", "")
 
-    # Guardamos manifest CSV
-    manifest_csv = BASE / "dist" / f"loterias_manifest_{datetime.now().strftime('%Y%m%d')}.csv"
-    pd.DataFrame(manifest).to_csv(manifest_csv, index=False)
+    total_rows = sum(m.get("rows", 0) for m in metas)
+    print(f"✓ Manifest: {manifest if manifest else '—'}")
+    if master_csv:
+        print(f"✓ Master CSV: {master_csv}")
+    if master_parquet:
+        print(f"✓ Master Parquet: {master_parquet}")
 
-    # Y manifest JSON (útil para máquinas)
-    manifest_json = OUT_DIR / "manifest.json"
-    manifest_json.write_text(json.dumps({
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "out_dir": str(OUT_DIR),
-        "files": manifest
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    total_rows = sum(m["rows"] for m in manifest)
-    print(f"✓ Manifest: {manifest_csv} ({len(manifest)} ficheros)")
-    print(f"Normalización Loterías · fin — archivos: {len(manifest)} · filas totales: {total_rows}")
+    print(f"Normalización Loterías · fin — archivos: {len(metas)} · filas totales: {total_rows}")
 
 if __name__ == "__main__":
     main()
