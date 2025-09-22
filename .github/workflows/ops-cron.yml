@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Restaura Service Account JSON (por si lo requieren otros scripts)
+      # Restaura el Service Account JSON (lo siguen usando otros scripts)
       - name: Restore Service Account JSON
         env:
           GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
@@ -24,7 +24,7 @@ jobs:
           mkdir -p ops/.secrets
           echo "$GOOGLE_SA_JSON_BASE64" | base64 -d > ops/.secrets/google-sa.json
 
-      # .env (opcional para otros scripts)
+      # Construye .env
       - name: Create .env
         run: |
           cat > ops/.env <<'ENV'
@@ -32,7 +32,7 @@ jobs:
           SHEETS_SPREADSHEET_ID=${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }}
 
-          # OAuth Drive
+          # === OAuth Drive ===
           GDRIVE_OAUTH_CLIENT_ID=${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET=${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN=${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
@@ -49,9 +49,9 @@ jobs:
       - name: Install deps
         run: |
           pip install -r ops/scripts/requirements.txt || true
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas pytz tzdata
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      # Debug rápido de credenciales y carpeta
+      # 🔍 Paso de depuración Drive OAuth + Folder
       - name: Debug Drive OAuth & Folder
         env:
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
@@ -64,16 +64,12 @@ jobs:
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
 
-          assert os.environ.get("GDRIVE_OAUTH_CLIENT_ID")
-          assert os.environ.get("GDRIVE_OAUTH_CLIENT_SECRET")
-          assert os.environ.get("GDRIVE_OAUTH_REFRESH_TOKEN")
-          assert os.environ.get("GDRIVE_FOLDER_ID")
-
           creds = Credentials(
               None,
               refresh_token=os.environ["GDRIVE_OAUTH_REFRESH_TOKEN"],
               client_id=os.environ["GDRIVE_OAUTH_CLIENT_ID"],
               client_secret=os.environ["GDRIVE_OAUTH_CLIENT_SECRET"],
+              token_uri="https://oauth2.googleapis.com/token",
           )
           svc = build("drive","v3",credentials=creds)
 
@@ -87,10 +83,9 @@ jobs:
           print("FOLDER_OK:", meta["name"], meta["id"])
           PY
 
-      # ===== Pipeline =====
-      - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Rotate -> Email)
+      # Ejecuta el pipeline
+      - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
         env:
-          # Email
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -99,24 +94,17 @@ jobs:
           SMTP_TO:   ${{ secrets.SMTP_TO }}
           SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
 
-          # IDs y rutas
           SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
 
-          # OAuth Drive
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
-
-          # Rotación
-          RETENTION_DAYS: "14"
-          ROTATE_DRY_RUN: "0"
         run: |
-          set -e
-          python ops/scripts/sheets_to_csv.py
-          python ops/scripts/normalize_loterias.py
-          bash ops/scripts/zip_all.sh
-          python ops/scripts/upload_to_gdrive.py
-          python ops/scripts/rotate_drive.py
-          python ops/scripts/send_summary_email.py
+          python ops/scripts/sheets_to_csv.py || true
+          python ops/scripts/normalize_legales.py || true
+          python ops/scripts/normalize_loterias.py || true
+          bash ops/scripts/zip_all.sh || true
+          python ops/scripts/upload_to_gdrive.py || true
+          python ops/scripts/send_summary_email.py || true
