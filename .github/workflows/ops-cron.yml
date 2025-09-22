@@ -118,6 +118,7 @@ jobs:
       # 🚀 Pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
       - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
         env:
+          # SMTP / Email
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -126,15 +127,18 @@ jobs:
           SMTP_TO:   ${{ secrets.SMTP_TO }}
           SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
 
+          # Sheets / Drive
           SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
 
+          # OAuth Drive
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
         run: |
           python ops/scripts/sheets_to_csv.py || true
+          python ops/scripts/normalize_loterias.py || true
           python ops/scripts/normalize_legales.py || true
           bash ops/scripts/zip_all.sh || true
           python ops/scripts/upload_to_gdrive.py || true
