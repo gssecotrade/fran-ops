@@ -23,6 +23,12 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 MANIFEST_PATH = BASE / "dist" / f"loterias_manifest_{datetime.now().strftime('%Y%m%d')}.csv"
 
 CANDIDATE_DATE_COLS = ["fecha", "date", "dia", "day", "fechajuego", "fechasorteo"]
+DATE_FORMATS_ES = [
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%Y-%m-%d",
+    "%d/%m/%y",
+]
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -32,7 +38,6 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 def sniff_delimiter(path: Path) -> str | None:
-    """Intenta detectar delimitador con csv.Sniffer; si falla, None (pandas inferirá)."""
     try:
         sample = path.read_text(encoding="utf-8", errors="ignore")[:10000]
         dialect = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"])
@@ -41,31 +46,20 @@ def sniff_delimiter(path: Path) -> str | None:
         return None
 
 def read_csv_robust(path: Path) -> pd.DataFrame:
-    """
-    Lectura tolerante:
-    1) utf-8, delimitador inferido, engine=python, on_bad_lines='skip'
-    2) si falla, latin-1 con mismas opciones
-    3) si sigue fallando, fuerza separador detectado (sniff) y vuelve a intentar
-    """
     delim = sniff_delimiter(path)
-    common_kwargs = dict(engine="python", on_bad_lines="skip")
-    # 1) utf-8
+    common = dict(engine="python", on_bad_lines="skip")
     try:
-        return pd.read_csv(path, sep=delim if delim else None, encoding="utf-8", **common_kwargs)
+        return pd.read_csv(path, sep=delim if delim else None, encoding="utf-8", **common)
     except Exception:
         pass
-    # 2) latin-1
     try:
-        return pd.read_csv(path, sep=delim if delim else None, encoding="latin-1", **common_kwargs)
+        return pd.read_csv(path, sep=delim if delim else None, encoding="latin-1", **common)
     except Exception:
         pass
-    # 3) fuerzo separadores candidatos si no hubo sniff
     for sep in [",", ";", "\t", "|"]:
-        try:
-            return pd.read_csv(path, sep=sep, encoding="utf-8", **common_kwargs)
-        except Exception:
+        for enc in ["utf-8", "latin-1"]:
             try:
-                return pd.read_csv(path, sep=sep, encoding="latin-1", **common_kwargs)
+                return pd.read_csv(path, sep=sep, encoding=enc, **common)
             except Exception:
                 continue
     raise RuntimeError(f"No se pudo leer de forma robusta: {path.name}")
@@ -73,8 +67,7 @@ def read_csv_robust(path: Path) -> pd.DataFrame:
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = (
-        df.columns
-        .astype(str)
+        df.columns.astype(str)
         .str.strip()
         .str.replace(r"\s+", "_", regex=True)
         .str.lower()
@@ -86,6 +79,21 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         .str.replace("[^a-z0-9_]", "", regex=True)
     )
     return df
+
+def parse_date_es(series: pd.Series) -> pd.Series:
+    """Intenta varios formatos ES y, si no, to_datetime con dayfirst=True."""
+    s = series.astype(str)
+    parsed = None
+    for fmt in DATE_FORMATS_ES:
+        try:
+            parsed = pd.to_datetime(s, format=fmt, errors="coerce")
+            # si con este formato salen suficientes no nulos, nos vale
+            if parsed.notna().sum() >= max(1, int(0.2 * len(s))):
+                return parsed.dt.date
+        except Exception:
+            pass
+    # fallback genérico pero con dayfirst=True (evita el warning)
+    return pd.to_datetime(s, errors="coerce", dayfirst=True).dt.date
 
 def add_common_fields(df: pd.DataFrame, src_name: str) -> pd.DataFrame:
     df = df.copy()
@@ -100,7 +108,7 @@ def add_common_fields(df: pd.DataFrame, src_name: str) -> pd.DataFrame:
     for col in CANDIDATE_DATE_COLS:
         if col in df.columns:
             try:
-                df["fecha_estandar"] = pd.to_datetime(df[col], errors="coerce").dt.date
+                df["fecha_estandar"] = parse_date_es(df[col])
             except Exception:
                 df["fecha_estandar"] = pd.NaT
             break
@@ -113,7 +121,6 @@ def normalize_one(csv_path: Path) -> tuple[int, Path | None]:
         print(f"❌ Error leyendo {csv_path.name}: {e}")
         return 0, None
 
-    # Limpiezas mínimas
     df = df.drop_duplicates().reset_index(drop=True)
     df = normalize_columns(df)
     df = add_common_fields(df, csv_path.name)
