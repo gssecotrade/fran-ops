@@ -5,9 +5,20 @@ on:
   schedule:
     - cron: '0 6 * * *'     # 08:00 Madrid (cron usa UTC)
 
+# Evita solapes si dos ejecuciones coinciden
+concurrency:
+  group: ops-cron
+  cancel-in-progress: true
+
+# Permisos mínimos
+permissions:
+  contents: read
+
 jobs:
   run-ops:
     runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Madrid
 
     steps:
       - uses: actions/checkout@v4
@@ -16,7 +27,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Restaura el Service Account JSON (lo siguen usando otros scripts)
+      # Restaura el Service Account JSON (lo usan algunos scripts)
       - name: Restore Service Account JSON
         env:
           GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
@@ -24,7 +35,7 @@ jobs:
           mkdir -p ops/.secrets
           echo "$GOOGLE_SA_JSON_BASE64" | base64 -d > ops/.secrets/google-sa.json
 
-      # Construye .env
+      # Variables comunes para utilidades locales
       - name: Create .env
         run: |
           cat > ops/.env <<'ENV'
@@ -32,11 +43,12 @@ jobs:
           SHEETS_SPREADSHEET_ID=${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }}
 
-          # === OAuth Drive ===
+          # OAuth Drive (imprescindible para subir ficheros)
           GDRIVE_OAUTH_CLIENT_ID=${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET=${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN=${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
 
+          # Email resumen
           SUMMARY_EMAIL=${{ secrets.SUMMARY_EMAIL }}
           SMTP_HOST=${{ secrets.SMTP_HOST }}
           SMTP_PORT=${{ secrets.SMTP_PORT }}
@@ -49,43 +61,12 @@ jobs:
       - name: Install deps
         run: |
           pip install -r ops/scripts/requirements.txt || true
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas pyarrow
 
-      # 🔍 Paso de depuración Drive OAuth + Folder
-      - name: Debug Drive OAuth & Folder
-        env:
-          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
-          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
-          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
-          GDRIVE_FOLDER_ID:           ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: |
-          python - <<'PY'
-          import os
-          from google.oauth2.credentials import Credentials
-          from googleapiclient.discovery import build
-
-          creds = Credentials(
-              None,
-              refresh_token=os.environ["GDRIVE_OAUTH_REFRESH_TOKEN"],
-              client_id=os.environ["GDRIVE_OAUTH_CLIENT_ID"],
-              client_secret=os.environ["GDRIVE_OAUTH_CLIENT_SECRET"],
-              token_uri="https://oauth2.googleapis.com/token",
-          )
-          svc = build("drive","v3",credentials=creds)
-
-          about = svc.about().get(fields="user(emailAddress)").execute()
-          print("AUTH_USER:", about["user"]["emailAddress"])
-
-          fid = os.environ["GDRIVE_FOLDER_ID"].strip()
-          meta = svc.files().get(
-              fileId=fid, fields="id,name,mimeType,parents", supportsAllDrives=True
-          ).execute()
-          print("FOLDER_OK:", meta["name"], meta["id"])
-          PY
-
-      # Ejecuta el pipeline
+      # Pipeline principal
       - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
         env:
+          # SMTP / Email
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -94,17 +75,30 @@ jobs:
           SMTP_TO:   ${{ secrets.SMTP_TO }}
           SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
 
+          # Sheets / Drive
           SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
 
+          # OAuth Drive (upload)
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
         run: |
           python ops/scripts/sheets_to_csv.py || true
-          python ops/scripts/normalize_legales.py || true
           python ops/scripts/normalize_loterias.py || true
-          bash ops/scripts/zip_all.sh || true
+          bash   ops/scripts/zip_all.sh || true
           python ops/scripts/upload_to_gdrive.py || true
           python ops/scripts/send_summary_email.py || true
+
+      # Artefactos útiles por cada run (manifest, master y zips)
+      - name: Upload artifacts (manifest & master)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loterias-dist
+          path: |
+            dist/loterias_manifest_*.csv
+            dist/loterias_master.*
+            dist/*.zip
+          if-no-files-found: ignore
