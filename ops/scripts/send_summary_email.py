@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import os, glob, smtplib, socket
 from email.utils import parseaddr
 from email.mime.multipart import MIMEMultipart
@@ -16,49 +14,41 @@ SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 SMTP_TO   = os.getenv("SMTP_TO", os.getenv("SUMMARY_EMAIL", SMTP_USER))
 
-def tail(path, n=20):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = [l.rstrip() for l in f.readlines()]
-        return lines[-n:]
-    except Exception:
-        return []
-
 def build_summary():
     lines = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines.append(f"Resumen Fran Ops · {now}\n")
 
     dist = os.path.join(BASE, "dist")
+
+    # ZIPs
     zips = sorted(glob.glob(os.path.join(dist, "*.zip")))
     lines.append(f"ZIPs en dist/: {len(zips)}")
     for z in zips[:20]:
         lines.append(f"  - {os.path.basename(z)}")
 
-    # Manifest
-    manifests = sorted(glob.glob(os.path.join(dist, "loterias_manifest_*.csv")))
-    lines.append(f"\nÚltimo manifest: {os.path.basename(manifests[-1]) if manifests else '—'}")
+    # Manifest / Master
+    manifest = sorted(glob.glob(os.path.join(dist, "loterias_manifest_*.csv")))
+    if manifest:
+        lines.append(f"\nÚltimo manifest: {os.path.basename(manifest[-1])}")
+    else:
+        lines.append("\nÚltimo manifest: —")
 
-    # Master
-    master_csv = os.path.join(dist, "loterias_master.csv")
-    if os.path.exists(master_csv):
-        lines.append("Master CSV: loterias_master.csv")
+    master = os.path.join(dist, "loterias_master.csv")
+    lines.append(f"Master CSV: {'sí' if os.path.exists(master) else '—'}")
 
-    # Drive links (si existen)
-    drive_links = os.path.join(dist, "drive_links.txt")
-    if os.path.exists(drive_links):
-        links = tail(drive_links, 20)
-        if links:
-            lines.append("\nLinks Drive subidos:")
-            for l in links[-10:]:
-                lines.append("  - " + l)
-
-    # CSVs de loterias/data
-    lot = os.path.join(BASE, "loterias", "data")
-    csvs = sorted(glob.glob(os.path.join(lot, "*.csv")))
-    lines.append(f"\nCSVs en loterias/data/: {len(csvs)}")
-    for c in csvs[-5:]:
-        lines.append(f"  - {os.path.basename(c)}")
+    # DQ (si existe)
+    dq_path = os.path.join(dist, "dq_report.txt")
+    if os.path.exists(dq_path):
+        lines.append("\n— DATA QUALITY —")
+        try:
+            with open(dq_path, "r", encoding="utf-8") as f:
+                dq_text = f.read().strip()
+            # no metas el informe entero si es gigante
+            snippet = "\n".join(dq_text.splitlines()[:80])
+            lines.append(snippet)
+        except Exception as e:
+            lines.append(f"(No se pudo leer dq_report.txt: {e})")
 
     return "\n".join(lines)
 
