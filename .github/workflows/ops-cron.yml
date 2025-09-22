@@ -1,13 +1,14 @@
 name: Fran Ops — Scheduler
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:        # Lanzamiento manual
   schedule:
-    - cron: '0 6 * * *'   # 08:00 Madrid (cron usa UTC)
+    - cron: '0 6 * * *'     # 08:00 Madrid (cron usa UTC)
 
 jobs:
   run-ops:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -15,7 +16,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Restaura Service Account (lo usan otros scripts)
+      # Restaura Service Account JSON (por si lo requieren otros scripts)
       - name: Restore Service Account JSON
         env:
           GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
@@ -23,16 +24,19 @@ jobs:
           mkdir -p ops/.secrets
           echo "$GOOGLE_SA_JSON_BASE64" | base64 -d > ops/.secrets/google-sa.json
 
-      # .env común
+      # .env (opcional para otros scripts)
       - name: Create .env
         run: |
           cat > ops/.env <<'ENV'
           GOOGLE_SA_JSON=${{ github.workspace }}/ops/.secrets/google-sa.json
           SHEETS_SPREADSHEET_ID=${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }}
+
+          # OAuth Drive
           GDRIVE_OAUTH_CLIENT_ID=${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET=${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN=${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+
           SUMMARY_EMAIL=${{ secrets.SUMMARY_EMAIL }}
           SMTP_HOST=${{ secrets.SMTP_HOST }}
           SMTP_PORT=${{ secrets.SMTP_PORT }}
@@ -45,8 +49,9 @@ jobs:
       - name: Install deps
         run: |
           pip install -r ops/scripts/requirements.txt || true
-          pip install pandas google-api-python-client google-auth-httplib2 google-auth-oauthlib
-      # 🔎 Debug Drive OAuth & Folder (reforzado)
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas pytz tzdata
+
+      # Debug rápido de credenciales y carpeta
       - name: Debug Drive OAuth & Folder
         env:
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
@@ -55,70 +60,37 @@ jobs:
           GDRIVE_FOLDER_ID:           ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           python - <<'PY'
-          import os, base64, sys, time, json, pathlib
+          import os
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
-          from googleapiclient.errors import HttpError
 
-          # Construye credenciales con token_uri explícito y scope DRIVE completo
+          assert os.environ.get("GDRIVE_OAUTH_CLIENT_ID")
+          assert os.environ.get("GDRIVE_OAUTH_CLIENT_SECRET")
+          assert os.environ.get("GDRIVE_OAUTH_REFRESH_TOKEN")
+          assert os.environ.get("GDRIVE_FOLDER_ID")
+
           creds = Credentials(
               None,
-              refresh_token=os.environ["GDRIVE_OAUTH_REFRESH_TOKEN"].strip(),
-              client_id=os.environ["GDRIVE_OAUTH_CLIENT_ID"].strip(),
-              client_secret=os.environ["GDRIVE_OAUTH_CLIENT_SECRET"].strip(),
-              token_uri="https://oauth2.googleapis.com/token",
-              scopes=["https://www.googleapis.com/auth/drive"],
+              refresh_token=os.environ["GDRIVE_OAUTH_REFRESH_TOKEN"],
+              client_id=os.environ["GDRIVE_OAUTH_CLIENT_ID"],
+              client_secret=os.environ["GDRIVE_OAUTH_CLIENT_SECRET"],
           )
           svc = build("drive","v3",credentials=creds)
 
-          # ¿Quién soy? (evitar redacción: mostramos dominio y últimos 4)
           about = svc.about().get(fields="user(emailAddress)").execute()
-          email = about["user"]["emailAddress"]
-          print("AUTH_USER_LEN:", len(email))
-          print("AUTH_USER_SHOW:", email.split("@")[-1], email[:2] + "..." + email[-4:])
+          print("AUTH_USER:", about["user"]["emailAddress"])
 
           fid = os.environ["GDRIVE_FOLDER_ID"].strip()
-          print("FOLDER_ID_LEN:", len(fid))
-          print("FOLDER_ID_SHOW:", fid[:4] + "..." + fid[-4:])
-
-          # Intenta leer metadatos de la carpeta objetivo
-          try:
-              meta = svc.files().get(
-                  fileId=fid,
-                  fields="id,name,mimeType,parents,owners(emailAddress),driveId",
-                  supportsAllDrives=True
-              ).execute()
-              print("FOLDER_META:", json.dumps(meta, ensure_ascii=False))
-          except HttpError as e:
-              print("GET_ERROR:", e)
-              # Lista primeras 20 carpetas visibles para esta cuenta
-              res = svc.files().list(
-                  q="mimeType='application/vnd.google-apps.folder' and trashed=false",
-                  fields="files(id,name,owners(emailAddress))",
-                  pageSize=20,
-                  includeItemsFromAllDrives=True,
-                  supportsAllDrives=True
-              ).execute()
-              print("VISIBLE_FOLDERS:", json.dumps(res.get("files", []), ensure_ascii=False))
-              sys.exit(2)
-
-          # Subida de prueba (crea un txt y lo borra)
-          p = pathlib.Path("drive_test.txt"); p.write_text("ok")
-          media_body = None
-          from googleapiclient.http import MediaFileUpload
-          media_body = MediaFileUpload(str(p), mimetype="text/plain", resumable=False)
-          file_meta = {"name": "drive_test.txt", "parents": [fid]}
-          up = svc.files().create(body=file_meta, media_body=media_body, fields="id,webViewLink", supportsAllDrives=True).execute()
-          print("TEST_UPLOAD:", up)
-          # Limpieza
-          svc.files().delete(fileId=up["id"]).execute()
-          print("TEST_DELETE_OK")
+          meta = svc.files().get(
+              fileId=fid, fields="id,name,mimeType,parents", supportsAllDrives=True
+          ).execute()
+          print("FOLDER_OK:", meta["name"], meta["id"])
           PY
 
-      # 🚀 Pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
-      - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
+      # ===== Pipeline =====
+      - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Rotate -> Email)
         env:
-          # SMTP / Email
+          # Email
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -127,7 +99,7 @@ jobs:
           SMTP_TO:   ${{ secrets.SMTP_TO }}
           SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
 
-          # Sheets / Drive
+          # IDs y rutas
           SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
@@ -136,10 +108,15 @@ jobs:
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+
+          # Rotación
+          RETENTION_DAYS: "14"
+          ROTATE_DRY_RUN: "0"
         run: |
-          python ops/scripts/sheets_to_csv.py || true
-          python ops/scripts/normalize_loterias.py || true
-          python ops/scripts/normalize_legales.py || true
-          bash ops/scripts/zip_all.sh || true
-          python ops/scripts/upload_to_gdrive.py || true
-          python ops/scripts/send_summary_email.py || true
+          set -e
+          python ops/scripts/sheets_to_csv.py
+          python ops/scripts/normalize_loterias.py
+          bash ops/scripts/zip_all.sh
+          python ops/scripts/upload_to_gdrive.py
+          python ops/scripts/rotate_drive.py
+          python ops/scripts/send_summary_email.py
