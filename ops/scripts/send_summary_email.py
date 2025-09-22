@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 import os, glob, smtplib, socket
 from email.utils import parseaddr
 from email.mime.multipart import MIMEMultipart
@@ -7,6 +7,7 @@ from datetime import datetime
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+# Coge credenciales de los Secrets que ya pusimos en GitHub Actions
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -20,35 +21,28 @@ def build_summary():
     lines.append(f"Resumen Fran Ops · {now}\n")
 
     dist = os.path.join(BASE, "dist")
-
-    # ZIPs
     zips = sorted(glob.glob(os.path.join(dist, "*.zip")))
     lines.append(f"ZIPs en dist/: {len(zips)}")
     for z in zips[:20]:
         lines.append(f"  - {os.path.basename(z)}")
 
-    # Manifest / Master
-    manifest = sorted(glob.glob(os.path.join(dist, "loterias_manifest_*.csv")))
-    if manifest:
-        lines.append(f"\nÚltimo manifest: {os.path.basename(manifest[-1])}")
-    else:
-        lines.append("\nÚltimo manifest: —")
+    legales = os.path.join(BASE, "legales", "salida")
+    manifests = sorted(glob.glob(os.path.join(legales, "manifest_*.csv")))
+    lines.append(f"\nÚltimo manifest: {os.path.basename(manifests[-1]) if manifests else '—'}")
 
-    master = os.path.join(dist, "loterias_master.csv")
-    lines.append(f"Master CSV: {'sí' if os.path.exists(master) else '—'}")
+    lot = os.path.join(BASE, "loterias", "data")
+    csvs = sorted(glob.glob(os.path.join(lot, "*.csv")))
+    lines.append(f"\nCSVs en loterias/data/: {len(csvs)}")
+    for c in csvs[-20:]:
+        lines.append(f"  - {os.path.basename(c)}")
 
-    # DQ (si existe)
-    dq_path = os.path.join(dist, "dq_report.txt")
-    if os.path.exists(dq_path):
-        lines.append("\n— DATA QUALITY —")
-        try:
-            with open(dq_path, "r", encoding="utf-8") as f:
-                dq_text = f.read().strip()
-            # no metas el informe entero si es gigante
-            snippet = "\n".join(dq_text.splitlines()[:80])
-            lines.append(snippet)
-        except Exception as e:
-            lines.append(f"(No se pudo leer dq_report.txt: {e})")
+    # Append DQ report if present
+    dq_report = os.path.join(dist, "dq_report.txt")
+    if os.path.exists(dq_report):
+        lines.append("\n--- DATA QUALITY REPORT ---")
+        with open(dq_report, "r", encoding="utf-8") as f:
+            dq_txt = f.read().strip()
+        lines.append(dq_txt)
 
     return "\n".join(lines)
 
