@@ -1,97 +1,65 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
-from pathlib import Path
+import sys
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
 
-# --- Lee variables de entorno (definidas en el workflow como Secrets) ---
-CLIENT_ID     = os.getenv("GDRIVE_OAUTH_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("GDRIVE_OAUTH_CLIENT_SECRET", "")
-REFRESH_TOKEN = os.getenv("GDRIVE_OAUTH_REFRESH_TOKEN", "")
-FOLDER_ID     = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+DIST_DIR = "dist"
 
-TOKEN_URI = "https://oauth2.googleapis.com/token"
-
-def get_service():
-    if not (CLIENT_ID and CLIENT_SECRET and REFRESH_TOKEN):
-        raise RuntimeError("Faltan CLIENT_ID/CLIENT_SECRET/REFRESH_TOKEN en env")
+def build_service_from_oauth():
     creds = Credentials(
         None,
-        refresh_token=REFRESH_TOKEN,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        token_uri=TOKEN_URI,          # IMPORTANTE para poder refrescar token
+        refresh_token=os.environ["GDRIVE_OAUTH_REFRESH_TOKEN"],
+        client_id=os.environ["GDRIVE_OAUTH_CLIENT_ID"],
+        client_secret=os.environ["GDRIVE_OAUTH_CLIENT_SECRET"],
+        token_uri="https://oauth2.googleapis.com/token",
     )
     return build("drive", "v3", credentials=creds)
 
-def ensure_folder(svc, folder_id: str):
-    if not folder_id:
-        raise RuntimeError("GDRIVE_FOLDER_ID vacío")
+def ensure_folder(service, folder_id):
     try:
-        meta = svc.files().get(
+        return service.files().get(
             fileId=folder_id,
-            fields="id,name,mimeType,driveId,parents",
+            fields="id,name,mimeType,parents",
             supportsAllDrives=True,
         ).execute()
-        if meta.get("mimeType") != "application/vnd.google-apps.folder":
-            raise RuntimeError(f"GDRIVE_FOLDER_ID no es una carpeta: {meta}")
-        print(f"✓ Carpeta destino: {meta['name']} ({meta['id']})")
-    except HttpError as e:
-        raise RuntimeError(f"GDRIVE_FOLDER_ID inválido o sin acceso: {folder_id} · {e}")
+    except Exception as e:
+        raise RuntimeError(f"GDRIVE_FOLDER_ID inválido: {folder_id} · {e}")
 
-def upload_one(svc, zip_path: Path, parent_id: str):
-    file_metadata = {"name": zip_path.name, "parents": [parent_id]}
-    media = MediaFileUpload(
-        zip_path.as_posix(),
-        mimetype="application/zip",
-        resumable=True,                # Subida robusta
-    )
-    request = svc.files().create(
+def upload_file(service, folder_id, filepath):
+    filename = os.path.basename(filepath)
+    media = MediaFileUpload(filepath, resumable=True)
+    file_metadata = {"name": filename, "parents": [folder_id]}
+    uploaded = service.files().create(
         body=file_metadata,
         media_body=media,
-        fields="id,name,webViewLink,parents",
-        supportsAllDrives=True,
-    )
-    try:
-        # next_chunk maneja la subida por partes
-        resp = None
-        while resp is None:
-            status, resp = request.next_chunk()
-        print(f"↑ Subido: {zip_path.name}  → {resp.get('webViewLink')}")
-        return resp
-    except HttpError as e:
-        print(f"✗ Error subiendo {zip_path.name}: {e}")
-        return None
+        fields="id,webViewLink",
+        supportsAllDrives=True
+    ).execute()
+    return uploaded
 
 def main():
-    base = Path(__file__).resolve().parents[2]
-    dist = base / "dist"
-    if not dist.exists():
-        print(f"No existe {dist}")
-        return
+    folder_id = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
+    if not folder_id:
+        print("❌ Falta GDRIVE_FOLDER_ID en entorno", file=sys.stderr)
+        sys.exit(1)
 
-    svc = get_service()
-    ensure_folder(svc, FOLDER_ID)
+    service = build_service_from_oauth()
+    ensure_folder(service, folder_id)
 
-    zips = sorted(dist.glob("*.zip"))
-    print(f"→ Subiendo ZIPs desde {dist} a Drive folder …")
-    links_out = []
+    links = []
+    for fname in os.listdir(DIST_DIR):
+        if not fname.endswith(".zip"):
+            continue
+        fpath = os.path.join(DIST_DIR, fname)
+        print(f"↑ Subiendo: {fname} …")
+        meta = upload_file(service, folder_id, fpath)
+        url = meta["webViewLink"]
+        print(f"→ OK: {fname} → {url}")
+        links.append(f"{fname}\t{url}")
 
-    for z in zips:
-        resp = upload_one(svc, z, FOLDER_ID)
-        if resp:
-            links_out.append(f"{resp['name']}\t{resp.get('webViewLink','')}")
-
-    if links_out:
-        out = dist / "drive_links.txt"
-        out.write_text("\n".join(links_out), encoding="utf-8")
-        print(f"✓ Enlaces guardados en {out}")
-    else:
-        print("No se subió ningún archivo.")
+    with open(os.path.join(DIST_DIR, "drive_links.txt"), "w") as f:
+        f.write("\n".join(links))
 
 if __name__ == "__main__":
     main()
