@@ -45,8 +45,7 @@ jobs:
       - name: Install deps
         run: |
           pip install -r ops/scripts/requirements.txt || true
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib google-auth
-
+          pip install pandas google-api-python-client google-auth-httplib2 google-auth-oauthlib
       # 🔎 Debug Drive OAuth & Folder (reforzado)
       - name: Debug Drive OAuth & Folder
         env:
