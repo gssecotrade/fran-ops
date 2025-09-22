@@ -1,7 +1,7 @@
 name: Fran Ops — Scheduler
 
 on:
-  workflow_dispatch:        # Lanzamiento manual
+  workflow_dispatch:        # Lanzamiento manual desde Actions
   schedule:
     - cron: '0 6 * * *'     # 08:00 Madrid (cron usa UTC)
 
@@ -32,7 +32,7 @@ jobs:
           SHEETS_SPREADSHEET_ID=${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }}
 
-          # === OAuth Drive (imprescindible) ===
+          # === OAuth Drive (imprescindible para subir a tu carpeta) ===
           GDRIVE_OAUTH_CLIENT_ID=${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET=${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN=${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
@@ -52,7 +52,55 @@ jobs:
           pip install -r ops/scripts/requirements.txt || true
           pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      # Ejecuta el pipeline
+      # === Debug: valida que el refresh token funciona y que el Folder ID es correcto/visible ===
+      - name: Debug Drive OAuth & Folder
+        env:
+          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID:           ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+
+          creds = Credentials(
+              None,
+              refresh_token=os.environ["GDRIVE_OAUTH_REFRESH_TOKEN"],
+              client_id=os.environ["GDRIVE_OAUTH_CLIENT_ID"],
+              client_secret=os.environ["GDRIVE_OAUTH_CLIENT_SECRET"],
+              scopes=["https://www.googleapis.com/auth/drive.file"],
+          )
+          svc = build("drive","v3",credentials=creds)
+
+          about = svc.about().get(fields="user(emailAddress), storageQuota").execute()
+          print("AUTH_USER:", about["user"]["emailAddress"])
+
+          fid = os.environ["GDRIVE_FOLDER_ID"].strip()
+          print("FOLDER_ID:", fid)
+
+          try:
+              meta = svc.files().get(
+                  fileId=fid,
+                  fields="id,name,mimeType,parents,owners(emailAddress),driveId",
+                  supportsAllDrives=True
+              ).execute()
+              print("FOLDER_META:", meta)
+          except Exception as e:
+              print("GET_ERROR:", repr(e))
+              # Plan B: listar carpetas visibles para este usuario (primeras 10)
+              res = svc.files().list(
+                  q="mimeType='application/vnd.google-apps.folder' and trashed=false",
+                  fields="files(id,name,owners(emailAddress),parents)",
+                  includeItemsFromAllDrives=True,
+                  supportsAllDrives=True,
+                  pageSize=10
+              ).execute()
+              print("VISIBLE_FOLDERS:", res.get("files", []))
+          PY
+
+      # Ejecuta el pipeline completo
       - name: Run pipeline (Sheets -> CSV -> Normalize -> ZIP -> Drive -> Email)
         env:
           # SMTP / Email
