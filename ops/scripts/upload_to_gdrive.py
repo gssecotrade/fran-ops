@@ -1,104 +1,121 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-import glob
-from datetime import datetime
+import sys
+from pathlib import Path
+from typing import Optional
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
-BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DIST = os.path.join(BASE, "dist")
+DIST_DIR = Path(__file__).resolve().parents[2] / "dist"
 
-# === OAuth por Refresh Token (sin cuota de Service Account) ===
-CLIENT_ID     = os.getenv("GDRIVE_OAUTH_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("GDRIVE_OAUTH_CLIENT_SECRET", "")
-REFRESH_TOKEN = os.getenv("GDRIVE_OAUTH_REFRESH_TOKEN", "")
+# VARIABLES DE ENTORNO
+FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "").strip()
 
-# Carpeta destino (Shared Drive folder / MyDrive folder)
-FOLDER_ID     = os.getenv("GDRIVE_FOLDER_ID", "")
+# OAuth (NO pasamos scopes aquí; el refresh token ya los trae)
+OAUTH_CLIENT_ID = os.getenv("GDRIVE_OAUTH_CLIENT_ID", "").strip()
+OAUTH_CLIENT_SECRET = os.getenv("GDRIVE_OAUTH_CLIENT_SECRET", "").strip()
+OAUTH_REFRESH_TOKEN = os.getenv("GDRIVE_OAUTH_REFRESH_TOKEN", "").strip()
 
-# Scopes mínimos para subir ficheros
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+TOKEN_URI = "https://oauth2.googleapis.com/token"
 
-def get_drive_service():
-    if not (CLIENT_ID and CLIENT_SECRET and REFRESH_TOKEN):
-        raise RuntimeError("Faltan GDRIVE_OAUTH_CLIENT_ID / _CLIENT_SECRET / _REFRESH_TOKEN en variables de entorno.")
+
+def build_drive_service():
+    """
+    Crea el servicio Drive usando OAuth Refresh Token.
+    IMPORTANTE: NO pasar scopes al crear Credentials; si los scopes
+    del refresh token y los de aquí difieren, Google responde invalid_scope.
+    """
+    if not (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET and OAUTH_REFRESH_TOKEN):
+        raise RuntimeError(
+            "Faltan credenciales OAuth en variables: "
+            "GDRIVE_OAUTH_CLIENT_ID / GDRIVE_OAUTH_CLIENT_SECRET / GDRIVE_OAUTH_REFRESH_TOKEN"
+        )
 
     creds = Credentials(
-        None,
-        refresh_token=REFRESH_TOKEN,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        scopes=SCOPES,
-        token_uri="https://oauth2.googleapis.com/token",
+        token=None,
+        refresh_token=OAUTH_REFRESH_TOKEN,
+        client_id=OAUTH_CLIENT_ID,
+        client_secret=OAUTH_CLIENT_SECRET,
+        token_uri=TOKEN_URI,
     )
-    # 'supportsAllDrives' lo forzamos en cada llamada
+    # build() refrescará automáticamente si es necesario
     return build("drive", "v3", credentials=creds)
 
-def ensure_folder(service, parent_id):
-    # Chequeo muy básico: la carpeta destino debe existir (si no, error claro)
+
+def ensure_folder(service, folder_id: str):
+    """Verifica que el folder exista y sea accesible."""
     try:
-        service.files().get(fileId=parent_id, fields="id, name, driveId, parents", supportsAllDrives=True).execute()
+        meta = (
+            service.files()
+            .get(
+                fileId=folder_id,
+                fields="id,name,mimeType,parents,driveId",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        if meta.get("mimeType") != "application/vnd.google-apps.folder":
+            raise RuntimeError(f"El id {folder_id} no es una carpeta en Drive.")
+        print(f"✓ Carpeta destino: {meta['name']} ({meta['id']})")
     except HttpError as e:
-        raise RuntimeError(f"GDRIVE_FOLDER_ID inválido o no compartido con tu cuenta: {parent_id} · {e}")
+        raise RuntimeError(
+            f"GDRIVE_FOLDER_ID inválido o no accesible: {folder_id} · {e}"
+        )
 
-def upload_file(service, filepath, folder_id):
-    name = os.path.basename(filepath)
 
-    file_metadata = {
-        "name": name,
-        "parents": [folder_id],
-    }
-    media = MediaFileUpload(filepath, resumable=True)
+def upload_file(service, folder_id: str, file_path: Path) -> Optional[str]:
+    """Sube un archivo a la carpeta destino. Devuelve el fileId si ok."""
+    body = {"name": file_path.name, "parents": [folder_id]}
+    media = MediaFileUpload(str(file_path), resumable=True)
 
-    # supportsAllDrives=True permite Shared Drives; si es Mi unidad, también funciona.
-    created = service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id, name, webViewLink, parents",
-        supportsAllDrives=True,
-    ).execute()
+    try:
+        created = (
+            service.files()
+            .create(
+                body=body,
+                media_body=media,
+                fields="id,name,webViewLink,parents",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        print(f"  ↑ Subido: {created['name']} → {created.get('webViewLink','')}")
+        return created["id"]
+    except HttpError as e:
+        print(f"  ❌ Error subiendo {file_path.name}: {e}")
+        return None
 
-    return created  # dict con id, name, webViewLink
 
 def main():
-    print(f"→ Subiendo ZIPs desde {DIST} a Drive folder {FOLDER_ID} …")
-
     if not FOLDER_ID:
-        print("⚠️ Falta GDRIVE_FOLDER_ID; nada que subir.")
-        return
+        print("Falta GDRIVE_FOLDER_ID.")
+        sys.exit(1)
 
-    zips = sorted(glob.glob(os.path.join(DIST, "*.zip")))
-    if not zips:
-        print("⚠️ No hay ZIPs en dist/; nada que subir.")
-        return
+    if not DIST_DIR.exists():
+        print(f"No existe la carpeta de salida: {DIST_DIR}")
+        sys.exit(0)
 
-    service = get_drive_service()
+    print(f"→ Subiendo ZIPs desde {DIST_DIR} a Drive folder *** …")
+
+    service = build_drive_service()
     ensure_folder(service, FOLDER_ID)
 
-    links_path = os.path.join(DIST, "drive_links.txt")
-    links = []
+    # Sube todos los ZIP del dist
+    zips = sorted(DIST_DIR.glob("*.zip"))
+    if not zips:
+        print("No hay ZIPs para subir.")
+        return
 
     for z in zips:
-        try:
-            created = upload_file(service, z, FOLDER_ID)
-            link = f"{created.get('name')} -> {created.get('webViewLink')}"
-            print(f"✅ Subido: {link}")
-            links.append(link)
-        except Exception as e:
-            print(f"❌ Error subiendo {z}: {e}")
+        upload_file(service, FOLDER_ID, z)
 
-    # Guardamos enlaces para el resumen
-    if links:
-        with open(links_path, "w", encoding="utf-8") as f:
-            f.write("Archivos subidos · " + datetime.now().strftime("%Y-%m-%d %H:%M") + "\n")
-            for l in links:
-                f.write(l + "\n")
-        print(f"✅ Subida completada. Enlaces guardados en {links_path}")
-    else:
-        print("⚠️ No se subió ningún archivo.")
+    print("✓ Subida completada.")
+
 
 if __name__ == "__main__":
     main()
