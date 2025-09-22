@@ -1,36 +1,64 @@
+cat > README.md <<'EOF'
 # Fran Ops — Loterías (Producción)
 
-## ¿Qué hace el sistema?
-Cada ejecución (manual o programada) realiza:
-1. **Extrae** 17 hojas del Google Sheet maestro y las guarda como CSV.
-2. **Normaliza** (limpieza, tipados, fechas, manifest y master CSV).
-3. **DQ (Data Quality)**: comprueba integridad, fechas, duplicados y números fuera de rango.
-4. **Empaqueta** en ZIPs (loterias, legales, marketing, hb_docs).
-5. **Sube a Google Drive** (carpeta `ops-drops`) y **registra** enlaces y métricas en una **Hoja de Control**.
-6. **Email resumen** con el estado, métricas y alertas de calidad.
+## Qué hace el sistema
+1) Extrae 17 hojas del Google Sheet maestro a CSV.
+2) Normaliza (limpieza, tipados, fechas, manifest y master CSV).
+3) Data Quality (duplicados, rangos de fechas, conteos).
+4) Empaqueta en ZIPs (loterias, legales, marketing, hb_docs).
+5) Sube a Google Drive (carpeta ops-drops) y guarda enlaces/métricas.
+6) Envía email resumen con estado y alertas.
 
 ## Salidas
-- **Drive**: 3–4 ZIPs con todo el material del día.
-- `dist/loterias_manifest_YYYYMMDD.csv`: inventario de ficheros normalizados.
-- `dist/loterias_master.csv`: consolidado listo para BI.
-- **Hoja de Control**: fila por ejecución con métricas + links a ZIPs y manifest.
+- Drive: 3–4 ZIPs por ejecución.
+- dist/loterias_manifest_YYYYMMDD.csv: inventario.
+- dist/loterias_master.csv: consolidado BI.
+- Hoja de Control: una fila por ejecución con métricas + links.
 
 ## Operación
-- **Manual**: GitHub → Actions → `Fran Ops — Scheduler` → **Run workflow**.
-- **Automático**: todos los días a las 08:00 Madrid (cron UTC 06:00).
-- **Alertas**: Si DQ = `FAIL`, el email lo indica y (opcional) se puede cortar la subida.
+- Manual: GitHub → Actions → “Fran Ops — Scheduler” → Run workflow.
+- Automático: 08:00 Madrid (cron UTC 06:00).
+- Si DQ = FAIL, el email lo indica (y puede cortar subida si se configura).
 
-## Mantenimiento mínimo
-- Si cambia el ID del Sheet o la carpeta destino de Drive, actualiza los **Secrets**:
-  - `SHEETS_SPREADSHEET_ID`, `GDRIVE_FOLDER_ID`.
-- Si cambian credenciales de Gmail para el resumen, actualiza:
-  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO`.
-- Para el control, usa `SHEETS_CONTROL_ID` (ver abajo).
+## Secrets mínimos (GitHub → Settings → Secrets and variables → Actions)
+- SHEETS_SPREADSHEET_ID
+- GDRIVE_FOLDER_ID
+- GOOGLE_SA_JSON_BASE64
+- GDRIVE_OAUTH_CLIENT_ID
+- GDRIVE_OAUTH_CLIENT_SECRET
+- GDRIVE_OAUTH_REFRESH_TOKEN
+- SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, SMTP_TO, SUMMARY_EMAIL
+- (Opcional) SHEETS_CONTROL_ID para la Hoja de Control
 
 ## Requisitos de compartición
-- **Service Account** (SA) compartida en Sheet y Drive:
-  - Email SA: `fran-chatgpt-ops@app-primitiva.iam.gserviceaccount.com`
-  - Comparte la Hoja de datos, la Hoja de control y la carpeta `ops-drops` al menos como **Editor**.
-- **OAuth Gmail/Drive**: ya configurado en Secrets (refresh token).
+- Service Account (SA) con acceso Editor al Sheet maestro, a la Hoja de Control y a la carpeta de Drive:
+  fran-chatgpt-ops@app-primitiva.iam.gserviceaccount.com
+- OAuth (los 3 secrets anteriores) ya configurado.
 
 ## Estructura
+ops/
+  scripts/
+    sheets_to_csv.py
+    normalize_loterias.py
+    dq_loterias.py
+    upload_to_gdrive.py
+    update_control_sheet.py
+    send_summary_email.py
+dist/
+  loterias_manifest_YYYYMMDD.csv
+  loterias_master.csv
+  *.zip
+
+## Hoja de Control (columnas sugeridas)
+timestamp_utc, dag_run_id, csv_count, rows_total, dq_status, manifest_path, master_path,
+zip_loterias, zip_legales, zip_marketing, zip_hb_docs
+
+## Orden del pipeline
+1) sheets_to_csv.py
+2) normalize_loterias.py
+3) dq_loterias.py
+4) zip_all.sh
+5) upload_to_gdrive.py
+6) update_control_sheet.py
+7) send_summary_email.py
+EOF
