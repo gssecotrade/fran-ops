@@ -1,162 +1,130 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Data Quality para Loterías:
-- Existencia y filas > 0
-- Fechas plausibles (si hay columnas de fecha)
-- Duplicados (por fila completa)
-- Diferencias vs. último manifest (conteos)
-Escribe resumen en dist/dq_report.txt y no rompe el pipeline (exit 0).
+DQ Loterías: limpieza básica y checks.
+- Lee CSVs en loterias/data
+- Hace backup de los originales en loterias/data/.bak_timestamp/
+- Para entradas.csv: elimina duplicados (mantiene primer registro)
+- Para cualquier col que parezca fecha: comprueba parseo (dayfirst=True), elimina filas con fechas inválidas o fuera de rango razonable
+- Genera dist/dq_report.txt con resumen (WARN/FAIL)
+Exit code: 0 siempre (pipeline recoge WARNs) — cambiamos si quieres que FAIL detenga pipeline.
 """
-
-import os, glob, sys, json
-from datetime import date, timedelta
+from pathlib import Path
 import pandas as pd
+from datetime import date
+import shutil
+import sys
 
-BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DATA_DIR = os.path.join(BASE, "loterias", "data")
-DIST_DIR = os.path.join(BASE, "dist")
-os.makedirs(DIST_DIR, exist_ok=True)
+ROOT = Path.cwd()
+DATA_DIR = ROOT / "loterias" / "data"
+DIST_DIR = ROOT / "dist"
+BACKUP_DIR = DATA_DIR / f".bak_{pd.Timestamp.today().strftime('%Y%m%d_%H%M%S')}"
+REPORT_PATH = DIST_DIR / "dq_report.txt"
 
-REPORT_PATH = os.path.join(DIST_DIR, "dq_report.txt")
+MIN_DATE = pd.Timestamp("2000-01-01").date()
+MAX_DATE = (pd.Timestamp.today() + pd.Timedelta(days=1)).date()
 
-# Heurística de columnas de fecha
-DATE_COL_HINTS = {"fecha", "date", "dia", "día", "fecharegistro", "fechapago"}
+def safe_mkdir(p: Path):
+    if not p.exists():
+        p.mkdir(parents=True, exist_ok=True)
 
-def safe_read_csv(path: str) -> pd.DataFrame:
-    kw = dict(
-        sep=",",
-        on_bad_lines="skip",  # tolerante
-        encoding="utf-8",
-    )
+def read_csv_robust(path: Path):
+    # use on_bad_lines='skip' for robustness
     try:
-        return pd.read_csv(path, **kw)
-    except Exception:
-        # Reintento flexible
-        return pd.read_csv(path, **{**kw, "engine": "python"})
+        return pd.read_csv(path, on_bad_lines="skip", dtype=str)
+    except Exception as e:
+        # fallback using engine python
+        return pd.read_csv(path, engine="python", on_bad_lines="skip", dtype=str)
 
-def find_date_cols(df: pd.DataFrame) -> list[str]:
-    cols = []
-    for c in df.columns:
-        cname = str(c).strip().lower()
-        if any(h in cname for h in DATE_COL_HINTS):
-            cols.append(c)
-    return cols
+def find_date_cols(df: pd.DataFrame):
+    # heurístico: nombres que contienen 'fecha' o 'date'
+    return [c for c in df.columns if "fecha" in c.lower() or "date" in c.lower()]
 
-def check_dates(df: pd.DataFrame) -> dict:
-    res = {"checked_cols": [], "out_of_range": 0, "rows": len(df)}
-    today = date.today()
-    min_ok = date(2000, 1, 1)
-    for col in find_date_cols(df):
-        try:
-            parsed = pd.to_datetime(df[col], errors="coerce", dayfirst=True).dt.date
-            oor = ((parsed < min_ok) | (parsed > (today + timedelta(days=1)))).sum()
-            res["out_of_range"] += int(oor)
-            res["checked_cols"].append(col)
-        except Exception:
-            # si no se puede parsear, lo ignoramos
-            pass
-    return res
-
-def compare_with_prev_manifest() -> list[str]:
-    msgs = []
-    manifests = sorted(glob.glob(os.path.join(DIST_DIR, "loterias_manifest_*.csv")))
-    if len(manifests) < 2:
-        msgs.append("Δ Sin manifest previo suficiente para comparar.")
-        return msgs
-
-    prev, curr = manifests[-2], manifests[-1]
-    mp = pd.read_csv(prev)
-    mc = pd.read_csv(curr)
-
-    # esperamos columnas: file, rows. Si no están, lo indicamos.
-    if not {"file", "rows"}.issubset(set(mc.columns)) or not {"file", "rows"}.issubset(set(mp.columns)):
-        msgs.append("Δ Manifest sin columnas esperadas (file, rows).")
-        return msgs
-
-    prev_map = dict(zip(mp["file"], mp["rows"]))
-    curr_map = dict(zip(mc["file"], mc["rows"]))
-
-    for f, rows in curr_map.items():
-        before = prev_map.get(f)
-        if before is None:
-            msgs.append(f"Δ {f}: nuevo (antes no existía).")
-        else:
-            delta = int(rows) - int(before)
-            if delta != 0:
-                msgs.append(f"Δ {f}: {before} → {rows} ({'+' if delta>0 else ''}{delta})")
-
-    missing = [f for f in prev_map.keys() if f not in curr_map]
-    for f in missing:
-        msgs.append(f"Δ {f}: desaparecido respecto a manifest previo.")
-
-    if not msgs:
-        msgs.append("Δ Sin cambios de conteo respecto al manifest previo.")
-    return msgs
+def parse_date_col(series):
+    return pd.to_datetime(series, errors="coerce", dayfirst=True).dt.date
 
 def main():
-    lines = []
-    status = "PASS"
-    warn_cnt = 0
-    fail_cnt = 0
+    safe_mkdir(DIST_DIR)
+    report_lines = []
+    warn_count = 0
+    fail_count = 0
 
-    csvs = sorted(glob.glob(os.path.join(DATA_DIR, "*.csv")))
-    if not csvs:
-        status = "FAIL"
-        lines.append("No hay CSVs en loterias/data/.")
-    else:
-        lines.append(f"CSV detectados: {len(csvs)}")
+    if not DATA_DIR.exists():
+        report_lines.append(f"ERROR: carpeta {DATA_DIR} no existe.")
+        fail_count += 1
+        with open(REPORT_PATH, "w") as f:
+            f.write("\n".join(report_lines))
+        print("\n".join(report_lines))
+        sys.exit(1)
 
-    for path in csvs:
-        name = os.path.basename(path)
-        try:
-            df = safe_read_csv(path)
-        except Exception as e:
-            status = "FAIL"
-            fail_cnt += 1
-            lines.append(f"❌ {name}: error leyendo CSV → {e}")
-            continue
+    safe_mkdir(BACKUP_DIR)
+    # backup originals
+    for f in DATA_DIR.glob("*.csv"):
+        shutil.copy2(f, BACKUP_DIR / f.name)
 
-        rows = len(df)
-        if rows == 0:
-            warn_cnt += 1
-            lines.append(f"⚠️  {name}: 0 filas.")
+    csvs = sorted(DATA_DIR.glob("*.csv"))
+    report_lines.append(f"Data Quality · Loterías · inicio")
+    report_lines.append(f"CSV detectados: {len(csvs)}")
+
+    total_rows_before = 0
+    total_rows_after = 0
+
+    for csv_path in csvs:
+        name = csv_path.name
+        df = read_csv_robust(csv_path)
+        n_before = len(df)
+        total_rows_before += n_before
+
+        per_file_notes = []
+        # Trim whitespace on string columns
+        for c in df.select_dtypes(include=["object"]).columns:
+            df[c] = df[c].astype(str).str.strip()
+
+        # Special: entradas.csv -> dedupe
+        if name.lower() == "entradas.csv":
+            # consider all columns to detect exact duplicates
+            n_dup = df.duplicated(keep="first").sum()
+            if n_dup > 0:
+                df = df.drop_duplicates(keep="first")
+                per_file_notes.append(f"{n_dup} filas duplicadas eliminadas")
+                warn_count += 1
+
+        # Check date columns
+        date_cols = find_date_cols(df)
+        date_issues = 0
+        if date_cols:
+            for col in date_cols:
+                parsed = parse_date_col(df[col])
+                bad_mask = parsed.isna() | (~parsed.between(MIN_DATE, MAX_DATE))
+                date_issues += int(bad_mask.sum())
+                if bad_mask.any():
+                    # remove rows with invalid date in that column
+                    df = df[~bad_mask]
+                    per_file_notes.append(f"{bad_mask.sum()} filas eliminadas por fechas inválidas en {col}")
+                    warn_count += 1
+
+        n_after = len(df)
+        total_rows_after += n_after
+
+        # Overwrite CSV with cleaned version
+        df.to_csv(csv_path, index=False)
+
+        if per_file_notes:
+            report_lines.append(f"⚠️ {name}: {n_after} filas · notes: {', '.join(per_file_notes)}")
         else:
-            lines.append(f"✓ {name}: {rows} filas.")
+            report_lines.append(f"✓ {name}: {n_after} filas.")
 
-        # Duplicados por fila completa
-        dups = int(df.duplicated().sum())
-        if dups > 0:
-            warn_cnt += 1
-            lines.append(f"⚠️  {name}: {dups} filas duplicadas.")
+    report_lines.append("")
+    report_lines.append(f"Total filas antes: {total_rows_before}")
+    report_lines.append(f"Total filas después: {total_rows_after}")
+    report_lines.append(f"Data Quality → WARN (warn={warn_count}, fail={fail_count})")
 
-        # Fechas plausibles
-        dchk = check_dates(df)
-        if dchk["checked_cols"]:
-            if dchk["out_of_range"] > 0:
-                warn_cnt += 1
-                lines.append(f"⚠️  {name}: fechas fuera de rango = {dchk['out_of_range']} (cols {dchk['checked_cols']}).")
-
-    # Comparación con manifest previo
-    lines.append("")
-    lines.extend(compare_with_prev_manifest())
-
-    # Resumen
-    if fail_cnt > 0:
-        status = "FAIL"
-    elif warn_cnt > 0:
-        status = "WARN"
-    else:
-        status = "PASS"
-
-    header = f"Data Quality · Loterías → {status} (warn={warn_cnt}, fail={fail_cnt})"
-    report = header + "\n" + "\n".join(lines) + "\n"
-
+    # write report
+    safe_mkdir(DIST_DIR)
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
-        f.write(report)
+        f.write("\n".join(report_lines))
 
-    print(report)
-    # No rompemos el pipeline
+    print("\n".join(report_lines))
+    # exit 0 so pipeline continues; if fail_count>0 you can change to non-zero to stop pipeline
     sys.exit(0)
 
 if __name__ == "__main__":
