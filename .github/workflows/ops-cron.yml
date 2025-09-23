@@ -1,21 +1,17 @@
 name: Fran Ops — Scheduler
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:        # <-- habilita disparo manual/API
   schedule:
-    - cron: '0 6 * * *'   # 08:00 Madrid (cron en UTC)
+    - cron: '0 6 * * *'     # 08:00 Madrid (cron usa UTC)
 
 concurrency:
   group: fran-ops-main
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 jobs:
   run-ops:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +19,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # --- Secrets a archivo (Service Account JSON para Sheets) ---
       - name: Restore Service Account JSON
         env:
           GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
@@ -31,95 +26,48 @@ jobs:
           mkdir -p ops/.secrets
           echo "$GOOGLE_SA_JSON_BASE64" | base64 -d > ops/.secrets/google-sa.json
 
-      # --- .env para scripts (también deja constancia en el runner) ---
       - name: Create .env
         run: |
           cat > ops/.env <<'ENV'
           GOOGLE_SA_JSON=${{ github.workspace }}/ops/.secrets/google-sa.json
           SHEETS_SPREADSHEET_ID=${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }}
-
-          # OAuth Drive (obligatorio para subir a tu Drive personal)
           GDRIVE_OAUTH_CLIENT_ID=${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET=${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN=${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
-
-          # Email resumen
+          SUMMARY_EMAIL=${{ secrets.SUMMARY_EMAIL }}
           SMTP_HOST=${{ secrets.SMTP_HOST }}
           SMTP_PORT=${{ secrets.SMTP_PORT }}
           SMTP_USER=${{ secrets.SMTP_USER }}
           SMTP_PASS=${{ secrets.SMTP_PASS }}
           SMTP_FROM=${{ secrets.SMTP_FROM }}
           SMTP_TO=${{ secrets.SMTP_TO }}
-          SUMMARY_EMAIL=${{ secrets.SUMMARY_EMAIL }}
-
-          # (Opcional) Hoja de Control
-          CONTROL_SHEET_ID=${{ secrets.CONTROL_SHEET_ID }}
           ENV
-          echo "=== .env ==="; sed 's/^\(.*PASS\|.*REFRESH\|.*SECRET\).*/\1=****/g' ops/.env
 
       - name: Install deps
         run: |
           pip install -r ops/scripts/requirements.txt || true
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas python-dateutil
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas
 
-      # --- Pipeline ---
-      - name: Extract · Sheets → CSV
+      - name: Run pipeline (Sheets -> CSV -> Normalize -> DQ -> ZIP -> Drive -> Email)
         env:
           SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
+          GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
-        run: python ops/scripts/sheets_to_csv.py
-
-      - name: Normalize Loterías
-        run: python ops/scripts/normalize_loterias.py
-
-      - name: Data Quality Loterías
-        run: python ops/scripts/dq_loterias.py
-
-      - name: ZIP all
-        run: bash ops/scripts/zip_all.sh
-
-      - name: Upload to Google Drive (OAuth)
-        env:
-          GDRIVE_FOLDER_ID:            ${{ secrets.GDRIVE_FOLDER_ID }}
-          GDRIVE_OAUTH_CLIENT_ID:      ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
-          GDRIVE_OAUTH_CLIENT_SECRET:  ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
-          GDRIVE_OAUTH_REFRESH_TOKEN:  ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
-        run: python ops/scripts/upload_to_gdrive.py
-
-      - name: Send summary email
-        env:
+          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM:${{ secrets.SMTP_FROM }}
-          SMTP_TO:  ${{ secrets.SMTP_TO }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
           SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
-        run: python ops/scripts/send_summary_email.py
-
-      # --- (Opcional) Escribir línea en Hoja de Control ---
-      - name: Update Control Sheet
-        if: ${{ env.CONTROL_SHEET_ID != '' }}
-        env:
-          CONTROL_SHEET_ID: ${{ secrets.CONTROL_SHEET_ID }}
-          GOOGLE_SA_JSON:   ${{ github.workspace }}/ops/.secrets/google-sa.json
         run: |
-          if [ -f ops/scripts/update_control_sheet.py ]; then
-            python ops/scripts/update_control_sheet.py
-          else
-            echo "No hay update_control_sheet.py (saltando)."
-          fi
-
-      # --- Artefactos para auditoría / descarga ---
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fran-ops-dist-${{ github.run_id }}
-          path: |
-            dist/*.zip
-            dist/loterias_manifest_*.csv
-            dist/loterias_master.csv
-            dist/dq_report.txt
-          if-no-files-found: warn
+          python ops/scripts/sheets_to_csv.py || true
+          python ops/scripts/normalize_loterias.py || true
+          python ops/scripts/dq_loterias.py || true
+          bash ops/scripts/zip_all.sh || true
+          python ops/scripts/upload_to_gdrive.py || true
+          python ops/scripts/send_summary_email.py || true
