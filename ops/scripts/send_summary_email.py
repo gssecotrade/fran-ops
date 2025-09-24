@@ -1,73 +1,118 @@
 #!/usr/bin/env python3
-import os, glob, smtplib, socket
-from email.utils import parseaddr
+# ops/scripts/send_summary_email.py
+import os, smtplib, json
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime
 
-BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DIST = os.environ.get("DIST_DIR", "dist")
 
-# Coge credenciales de los Secrets que ya pusimos en GitHub Actions
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
-SMTP_TO   = os.getenv("SMTP_TO", os.getenv("SUMMARY_EMAIL", SMTP_USER))
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except:
+        return ""
 
-def build_summary():
+def read_report_json():
+    # make_report.py deja report.json en dist/ y el workflow lo copia a docs/
+    # Preferimos dist/report.json; si no está, probamos docs/report.json
+    candidates = [os.path.join(DIST, "report.json"), os.path.join("docs", "report.json")]
+    for p in candidates:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            pass
+    return None
+
+def build_body():
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
     lines = []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines.append(f"Resumen Fran Ops · {now}\n")
+    lines.append("=== RESUMEN ===")
+    lines.append(f"Resumen Fran Ops · {now} UTC")
+    lines.append("")
 
-    dist = os.path.join(BASE, "dist")
-    zips = sorted(glob.glob(os.path.join(dist, "*.zip")))
-    lines.append(f"ZIPs en dist/: {len(zips)}")
-    for z in zips[:20]:
-        lines.append(f"  - {os.path.basename(z)}")
+    # Inventario de ZIPs
+    try:
+        items = sorted([f for f in os.listdir(DIST) if f.endswith(".zip")])
+    except FileNotFoundError:
+        items = []
+    lines.append(f"ZIPs en dist/: {len(items)}")
+    for z in items:
+        lines.append(f"  - {z}")
+    lines.append("")
 
-    legales = os.path.join(BASE, "legales", "salida")
-    manifests = sorted(glob.glob(os.path.join(legales, "manifest_*.csv")))
-    lines.append(f"\nÚltimo manifest: {os.path.basename(manifests[-1]) if manifests else '—'}")
+    # Manifest y Master CSV si existen
+    manifest = ""
+    master   = ""
+    try:
+        manifest = sorted([f for f in os.listdir(DIST) if f.startswith("loterias_manifest_") and f.endswith(".csv")])[-1]
+    except:
+        pass
+    if manifest:
+        lines.append(f"Último manifest: {manifest}")
+    else:
+        lines.append("Último manifest: —")
+    master_path = os.path.join(DIST, "loterias_master.csv")
+    lines.append(f"Master CSV: {'sí' if os.path.exists(master_path) else 'no'}")
+    lines.append("")
 
-    lot = os.path.join(BASE, "loterias", "data")
-    csvs = sorted(glob.glob(os.path.join(lot, "*.csv")))
-    lines.append(f"\nCSVs en loterias/data/: {len(csvs)}")
-    for c in csvs[-20:]:
-        lines.append(f"  - {os.path.basename(c)}")
+    # Data Quality (texto plano si existe)
+    dq_path = os.path.join(DIST, "dq_report.txt")
+    dq_text = read_text(dq_path)
+    if dq_text:
+        lines.append("--- DATA QUALITY ---")
+        lines.append(dq_text)
+        lines.append("")
 
-    # Append DQ report if present
-    dq_report = os.path.join(dist, "dq_report.txt")
-    if os.path.exists(dq_report):
-        lines.append("\n--- DATA QUALITY REPORT ---")
-        with open(dq_report, "r", encoding="utf-8") as f:
-            dq_txt = f.read().strip()
-        lines.append(dq_txt)
+    # Panel DQ (desde report.json)
+    rpt = read_report_json()
+    if rpt:
+        status = rpt.get("status", "UNKNOWN")
+        url    = rpt.get("page_url", "") or rpt.get("panel_url", "")
+        emoji  = {"OK":"✅", "WARN":"⚠️", "FAIL":"❌"}.get(status, "ℹ️")
+        lines.append("--- PANEL DQ ---")
+        lines.append(f"Estado: {emoji} {status}")
+        if url:
+            lines.append(f"URL: {url}")
+        lines.append("")
+    else:
+        lines.append("--- PANEL DQ ---")
+        lines.append("No se encontró report.json (aún).")
+        lines.append("")
 
     return "\n".join(lines)
 
-def send_email(subject, body):
-    if not (SMTP_USER and SMTP_PASS and SMTP_TO):
+def send_email(body: str):
+    user = os.environ.get("SMTP_USER")
+    pw   = os.environ.get("SMTP_PASS")
+    to   = os.environ.get("SMTP_TO")
+    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+
+    if not (user and pw and to):
         print("⚠️ Falta SMTP_USER/SMTP_PASS/SMTP_TO en secrets")
+        print(body)
         return
 
     msg = MIMEMultipart()
-    msg["From"] = SMTP_FROM
-    msg["To"] = SMTP_TO
-    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"]   = to
+    msg["Subject"] = f"[Fran Ops] Resumen {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    envelope_from = parseaddr(SMTP_FROM)[1] or SMTP_USER
-    envelope_to = [e.strip() for e in SMTP_TO.split(",") if e.strip()]
+    with smtplib.SMTP(host, port) as server:
+        server.starttls()
+        server.login(user, pw)
+        server.send_message(msg)
+    print("📧 Email de resumen enviado (SMTP).")
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
-        s.starttls()
-        s.login(SMTP_USER, SMTP_PASS)
-        s.sendmail(envelope_from, envelope_to, msg.as_string())
-        print("📧 Email de resumen enviado (SMTP).")
+def main():
+    body = build_body()
+    print(body)
+    send_email(body)
 
 if __name__ == "__main__":
-    subject = f"[Fran Ops] Resumen {datetime.now().strftime('%Y-%m-%d %H:%M')} · {socket.gethostname()}"
-    body = build_summary()
-    print("=== RESUMEN ===\n" + body + "\n================")
-    send_email(subject, body)
+    main()
