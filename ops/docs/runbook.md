@@ -1,24 +1,13 @@
-# Fran Ops · Runbook
+1) Extrae datos de Sheets → CSV (ops/scripts/sheets_to_csv.py)
+2) Normaliza loterías y genera manifest/master (ops/scripts/normalize_loterias.py)
+3) Data Quality (ops/scripts/dq_loterias.py) → dist/dq_report.txt
+4) ZIPs en dist/ y subida a Drive (ops/scripts/upload_to_gdrive.py)
+5) Genera panel DQ (make_report.py) → docs/index.html
 
-## Lanzar manualmente
-- GitHub → Actions → **Fran Ops — Scheduler** → Run workflow.
+GitHub → Actions → *Fran Ops — Scheduler* → Run workflow
+- Si falla con invalid_scope o 404 de carpeta:
+  - Revisa secretos: GDRIVE_OAUTH_CLIENT_ID, GDRIVE_OAUTH_CLIENT_SECRET, GDRIVE_OAUTH_REFRESH_TOKEN, GDRIVE_FOLDER_ID.
+  - Comparte la carpeta destino en Drive con el *service account* si aplica.
+- Secretos SMTP: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, SMTP_TO.
 
-## Qué comprobar
-- Email resumen (asunto `[Fran Ops] Resumen …`) debe llegar en <2 min.
-- Panel DQ: `Settings → Pages` o `<https://<tu-usuario>.github.io/fran-ops/>`  
-  Debe mostrar:
-  - Estado **OK/WARN/FAIL**.
-  - Enlaces a ZIPs en Drive.
-  - Manifest y Master CSV.
-
-## Errores frecuentes
-- **Drive OAuth `invalid_scope`**: refrescar token con `get_refresh_token.py` y actualizar secretos.
-- **404 Folder**: `GDRIVE_FOLDER_ID` no corresponde a la carpeta compartida → verifica ID y permisos.
-- **Email**: SMTP_* secretos incompletos.
-
-## Mantenimiento
-- **Limpieza Drive**: automática (>30 días). Ajusta `GDRIVE_CLEANUP_DAYS` en el workflow.
-- **DQ reglas**: `ops/scripts/dq_loterias.py`.
-
-## Contactos
-- Owner repo: @gssecotrade
+- El script elimina ZIPs antiguos automáticamente (ver ops/scripts/upload_to_gdrive.py).
