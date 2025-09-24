@@ -1,123 +1,39 @@
 name: Fran Ops — Scheduler
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:        # Permite lanzarlo manualmente
   schedule:
-    - cron: "08:00"   # Todos los días a las 08:00 UTC
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: ops-cron
-  cancel-in-progress: false
-
-env:
-  PYTHON_VERSION: "3.11"
-  DIST_DIR: dist
-  DATA_DIR: loterias/data
-  GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-  # OAuth Google (Drive/Sheets/Gmail) – ya los tienes configurados
-  GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-  GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-  GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-  # SMTP (opcional; el script maneja la ausencia)
-  SMTP_USER: ${{ secrets.SMTP_USER }}
-  SMTP_PASS: ${{ secrets.SMTP_PASS }}
-  SMTP_TO:   ${{ secrets.SMTP_TO }}
-
-  # Limpieza de zips en Drive (> días)
-  GDRIVE_CLEAN_DAYS: "30"
-
-  # Hoja de Control (pestaña Control_Pipeline)
-  CONTROL_SHEET_ID: ${{ secrets.CONTROL_SHEET_ID }}      # <-- añade este secret con el ID de tu Sheet
-  CONTROL_TAB_NAME: "Control_Pipeline"
-  CONTROL_RANGE: "A2:I"                                  # dónde se insertan las filas
+    - cron: "0 8 * * *"     # Todos los días a las 08:00 UTC
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.11"
 
-      - name: Install deps (ligero)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r ops/scripts/requirements.txt || true
-          pip install pandas google-api-python-client google-auth-httplib2 google-auth-oauthlib
+          pip install -r ops/scripts/requirements.txt
 
-      # 1) Sheets → CSV
-      - name: Run sheets_to_csv
+      - name: Run pipeline (Sheets → CSVs, normalize, manifest, zips)
         run: |
-          echo "Sheets -> CSV (Loterías) · inicio"
-          python ops/scripts/sheets_to_csv.py || true
+          python ops/scripts/normalize_loterias.py
+          python ops/scripts/dq_loterias.py
 
-      # 2) Normalización
-      - name: Normalize CSVs
-        run: python ops/scripts/normalize_loterias.py
-
-      # 3) Data Quality (genera dist/dq_report.txt)
-      - name: Data Quality Loterías
-        run: python ops/scripts/dq_loterias.py || true
-
-      # 4) ZIPs locales
-      - name: Zip outputs
-        run: bash ops/scripts/zip_all.sh
-
-      # 5) Subida a Drive + autolimpieza
-      - name: Upload to Google Drive (with cleanup)
-        env:
-          GDRIVE_FOLDER_ID: ${{ env.GDRIVE_FOLDER_ID }}
-          GOOGLE_CLIENT_ID: ${{ env.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ env.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_REFRESH_TOKEN: ${{ env.GOOGLE_REFRESH_TOKEN }}
-          GDRIVE_CLEAN_DAYS: ${{ env.GDRIVE_CLEAN_DAYS }}
-        run: python ops/scripts/upload_to_gdrive.py
-
-      # 6) Email resumen (incluye estado DQ)
-      - name: Send summary email
-        env:
-          SMTP_USER: ${{ env.SMTP_USER }}
-          SMTP_PASS: ${{ env.SMTP_PASS }}
-          SMTP_TO:   ${{ env.SMTP_TO }}
-        run: python ops/scripts/send_summary_email.py || true
-
-      # 7) Panel DQ (report.json + docs/index.html)
-      - name: Build report.json for Pages
+      - name: Build report.json + docs/index.html
         run: |
           python ops/scripts/make_report.py
-          test -f dist/report.json || (echo "report.json faltante" && exit 1)
 
-      - name: Upload artifact for Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
+      - name: Send summary email
+        run: |
+          python ops/scripts/send_summary_email.py
 
-      # 8) Registrar el run en Hoja de Control
-      - name: Update Control Sheet (append run row)
-        if: ${{ env.CONTROL_SHEET_ID != '' }}
-        env:
-          CONTROL_SHEET_ID: ${{ env.CONTROL_SHEET_ID }}
-          CONTROL_TAB_NAME: ${{ env.CONTROL_TAB_NAME }}
-          CONTROL_RANGE: ${{ env.CONTROL_RANGE }}
-          GOOGLE_CLIENT_ID: ${{ env.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ env.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_REFRESH_TOKEN: ${{ env.GOOGLE_REFRESH_TOKEN }}
+      - name: Update control sheet
         run: |
           python ops/scripts/update_control_sheet.py
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
