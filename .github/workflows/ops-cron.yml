@@ -1,9 +1,9 @@
-name: .github/workflows/ops-cron.yml
+name: Fran Ops — Scheduler
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "5 12 * * 1,4,6"   # L-J-S a las 12:05 UTC (ajústalo si quieres)
-  workflow_dispatch: {}
+    - cron: "08:00"   # Todos los días a las 08:00 UTC
 
 permissions:
   contents: read
