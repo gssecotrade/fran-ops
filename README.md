@@ -1,3 +1,6 @@
+## Panel Data Quality
+[![pages](https://img.shields.io/badge/DQ%20Panel-live-blue)](https://gssecotrade.github.io/fran-ops/)
+
 cat > README.md <<'EOF'
 # Fran Ops — Loterías (Producción)
 
