@@ -1,17 +1,26 @@
 name: Fran Ops — Scheduler
 
 on:
-  workflow_dispatch:        # <-- habilita disparo manual/API
+  workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'     # 08:00 Madrid (cron usa UTC)
+    - cron: '0 6 * * *'   # 08:00 Madrid (UTC)
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
 
 concurrency:
-  group: fran-ops-main
+  group: fran-ops
   cancel-in-progress: false
 
 jobs:
   run-ops:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,9 +41,13 @@ jobs:
           GOOGLE_SA_JSON=${{ github.workspace }}/ops/.secrets/google-sa.json
           SHEETS_SPREADSHEET_ID=${{ secrets.SHEETS_SPREADSHEET_ID }}
           GDRIVE_FOLDER_ID=${{ secrets.GDRIVE_FOLDER_ID }}
+
+          # OAuth Drive
           GDRIVE_OAUTH_CLIENT_ID=${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET=${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN=${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+
+          # SMTP
           SUMMARY_EMAIL=${{ secrets.SUMMARY_EMAIL }}
           SMTP_HOST=${{ secrets.SMTP_HOST }}
           SMTP_PORT=${{ secrets.SMTP_PORT }}
@@ -49,14 +62,8 @@ jobs:
           pip install -r ops/scripts/requirements.txt || true
           pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas
 
-      - name: Run pipeline (Sheets -> CSV -> Normalize -> DQ -> ZIP -> Drive -> Email)
+      - name: Run pipeline
         env:
-          SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
-          GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
-          GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
-          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
-          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
-          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -64,10 +71,43 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           SMTP_TO:   ${{ secrets.SMTP_TO }}
           SUMMARY_EMAIL: ${{ secrets.SUMMARY_EMAIL }}
+
+          SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
+          GDRIVE_FOLDER_ID:      ${{ secrets.GDRIVE_FOLDER_ID }}
+          GOOGLE_SA_JSON:        ${{ github.workspace }}/ops/.secrets/google-sa.json
+
+          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+
+          # Días para limpieza de Drive
+          GDRIVE_CLEANUP_DAYS: 30
         run: |
-          python ops/scripts/sheets_to_csv.py || true
-          python ops/scripts/normalize_loterias.py || true
-          python ops/scripts/dq_loterias.py || true
-          bash ops/scripts/zip_all.sh || true
-          python ops/scripts/upload_to_gdrive.py || true
-          python ops/scripts/send_summary_email.py || true
+          set -e
+          python ops/scripts/sheets_to_csv.py
+          python ops/scripts/normalize_loterias.py
+          python ops/scripts/dq_loterias.py
+          bash   ops/scripts/zip_all.sh
+          python ops/scripts/upload_to_gdrive.py
+          python ops/scripts/send_summary_email.py
+
+      - name: Build report.json for Pages
+        env:
+          DIST_DIR: dist
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python ops/scripts/make_report.py
+          cp dist/report.json docs/report.json
+
+      # Publicar GitHub Pages
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
