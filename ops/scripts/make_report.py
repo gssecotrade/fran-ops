@@ -1,278 +1,240 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Genera:
-  - dist/report.json  (datos estructurados del último run + series históricas)
-  - docs/index.html   (panel DQ con gráficas y enlaces)
+# ops/scripts/make_report.py
+import os, glob, json, time, re
+from datetime import datetime, timezone
+from string import Template
+from pathlib import Path
 
-Entrada esperada en dist/:
-  - loterias_manifest_YYYYMMDD.csv      (uno por run; usamos todos para series)
-  - loterias_master.csv                 (opcional, sólo informativo)
-  - dq_report.txt                       (resumen DQ del último run)
-  - drive_links.txt                     (3 líneas: legales, loterias, marketing)
-  - *.zip                               (mostramos los del último run)
-"""
-
-import os, re, csv, json, glob, html, pathlib
-from datetime import datetime
-
+# --- Config ---
 DIST = os.environ.get("DIST_DIR", "dist")
-DOCS_DIR = "docs"
+DOCS_HTML = "docs/index.html"
+DQ_REPORT_TXT = os.path.join(DIST, "dq_report.txt")
+DRIVE_LINKS_TXT = os.path.join(DIST, "drive_links.txt")
 REPORT_JSON = os.path.join(DIST, "report.json")
-HTML_OUT = os.path.join(DOCS_DIR, "index.html")
 
-# ------------------------ utilidades --------------------------------
-def read_text(path: str) -> str:
+def read_text(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception:
+            return f.read()
+    except:
         return ""
 
-def find_manifests() -> list:
-    pats = sorted(glob.glob(os.path.join(DIST, "loterias_manifest_*.csv")))
-    # Orden por fecha incluida en el nombre
-    def key(p):
-        m = re.search(r"_(\d{8})", p)  # YYYYMMDD
-        return m.group(1) if m else "00000000"
-    return sorted(pats, key=key)
+def find_latest_manifest():
+    files = sorted(glob.glob(os.path.join(DIST, "loterias_manifest_*.csv")), reverse=True)
+    return files[0] if files else ""
 
-def parse_manifest_rows(manifest_path: str) -> dict:
-    """
-    Devuelve { 'date':'YYYY-MM-DD', 'csv_count':N, 'rows_total':M }
-    Intenta sumar una columna 'rows' (o similar). Si no existe, usa 0.
-    """
-    date_str = "1970-01-01"
-    m = re.search(r"_(\d{8})", manifest_path)
-    if m:
-        y,mn,d = m.group(1)[:4], m.group(1)[4:6], m.group(1)[6:8]
-        date_str = f"{y}-{mn}-{d}"
+def drive_links():
+    out = []
+    if not os.path.exists(DRIVE_LINKS_TXT):
+        return out
+    with open(DRIVE_LINKS_TXT, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line: 
+                continue
+            # Formato esperado: "<nombre>\t<url>"
+            parts = line.split("\t")
+            if len(parts) == 2:
+                out.append({"name": parts[0], "url": parts[1]})
+            else:
+                # fallback: intenta detectar URL
+                m = re.search(r"(https?://\S+)", line)
+                url = m.group(1) if m else "#"
+                out.append({"name": line.replace(url,"").strip() or "link", "url": url})
+    return out
 
-    rows_total = 0
-    csv_count = 0
-    header = []
-    rows_idx = None
-
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for i, r in enumerate(reader):
-                if i == 0:
-                    header = [c.strip().lower() for c in r]
-                    # buscamos una columna de filas
-                    for cand in ("rows","row_count","n_rows","filas","count"):
-                        if cand in header:
-                            rows_idx = header.index(cand)
-                            break
-                else:
-                    if not r or all(x.strip()=="" for x in r):
-                        continue
-                    csv_count += 1
-                    if rows_idx is not None and rows_idx < len(r):
-                        try:
-                            rows_total += int(float(str(r[rows_idx]).strip() or "0"))
-                        except Exception:
-                            pass
-    except Exception:
-        pass
-
-    return {"date": date_str, "csv_count": csv_count, "rows_total": rows_total}
-
-def latest_zip_names() -> list:
+def zip_list():
     zips = sorted(glob.glob(os.path.join(DIST, "*.zip")))
-    # Nos quedamos con los de la misma marca temporal que el último manifest si existe
-    latest = zips[-3:]  # fallback
-    return [os.path.basename(p) for p in latest]
+    return [os.path.basename(z) for z in zips]
 
-def read_drive_links() -> list:
-    path = os.path.join(DIST, "drive_links.txt")
-    lines = [x for x in read_text(path).splitlines() if x.strip()]
-    # esperamos 3 líneas (legales, loterias, marketing) pero mostramos las que haya
-    return lines
-
-def parse_dq() -> dict:
-    path = os.path.join(DIST, "dq_report.txt")
-    txt = read_text(path)
+def parse_dq_status(txt):
+    # Busca línea “Data Quality → WARN (warn=2, fail=0)” o similar
     status = "UNKNOWN"
-    warn = 0
-    fail = 0
-    # Buscar "Data Quality → OK|WARN|FAIL" o líneas similares
-    m = re.search(r"Data Quality\s*[^\n]*\s*→\s*(OK|WARN|FAIL)", txt, re.IGNORECASE)
+    warn = fail = 0
+    m = re.search(r"Data Quality\s*[^\n]*\s*→\s*([A-Z]+)\s*\(warn\s*=\s*(\d+),\s*fail\s*=\s*(\d+)\)", txt, re.I)
     if m:
         status = m.group(1).upper()
-    # Buscar "(warn=X, fail=Y)"
-    m2 = re.search(r"\(warn\s*=\s*(\d+)\s*,\s*fail\s*=\s*(\d+)\)", txt, re.IGNORECASE)
-    if m2:
-        warn = int(m2.group(1))
-        fail = int(m2.group(2))
-    return {"status": status, "warn": warn, "fail": fail, "raw": txt}
+        warn = int(m.group(2))
+        fail = int(m.group(3))
+    else:
+        # otra variante sin flecha:
+        m2 = re.search(r"Data Quality\s*[^\n]*:\s*([A-Z]+)\s*\(warn\s*=\s*(\d+),\s*fail\s*=\s*(\d+)\)", txt, re.I)
+        if m2:
+            status = m2.group(1).upper()
+            warn = int(m2.group(2))
+            fail = int(m2.group(3))
+    return status, warn, fail
 
-def find_master_csv() -> str:
-    p = os.path.join(DIST, "loterias_master.csv")
-    return os.path.basename(p) if os.path.exists(p) else ""
+def status_badge(status):
+    s = (status or "").upper()
+    if s == "OK":
+        return '✅ OK'
+    if s == "WARN":
+        return '⚠️ WARN'
+    if s == "FAIL":
+        return '❌ FAIL'
+    return 'ℹ️ UNKNOWN'
 
-def find_latest_manifest() -> str:
-    manifests = find_manifests()
-    return os.path.basename(manifests[-1]) if manifests else ""
+def build_report_json():
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    manifest = find_latest_manifest()
+    manifest_name = os.path.basename(manifest) if manifest else ""
+    master_exists = os.path.exists(os.path.join(DIST, "loterias_master.csv"))
 
-def now_utc_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    dq_txt = read_text(DQ_REPORT_TXT)
+    dq_status, dq_warn, dq_fail = parse_dq_status(dq_txt)
 
-# ------------------------ construcción del reporte -------------------
-def build_report():
-    manifests = find_manifests()
-    series = [parse_manifest_rows(p) for p in manifests]
-
-    dq = parse_dq()
-    latest_manifest = find_latest_manifest()
-    master_csv = find_master_csv()
-    zips = latest_zip_names()
-    drive_links = read_drive_links()
-
-    data = {
-        "generated_at": now_utc_iso(),
-        "latest_manifest": latest_manifest,
-        "master_csv": bool(master_csv),
-        "zips": zips,
-        "drive_links": drive_links,
-        "dq": dq,                 # {status, warn, fail, raw}
-        "series": series,         # [{date,csv_count,rows_total}, ...]
+    report = {
+        "updated_utc": now_utc,
+        "dq": {
+            "status": dq_status,
+            "warn": dq_warn,
+            "fail": dq_fail
+        },
+        "files": {
+            "manifest": manifest_name,
+            "master_csv": bool(master_exists),
+            "zips": zip_list()
+        },
+        "drive_links": drive_links()
     }
-    return data
+    os.makedirs(DIST, exist_ok=True)
+    with open(REPORT_JSON, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return report
 
-# ------------------------ HTML (Chart.js) ----------------------------
-def render_html(report: dict) -> str:
-    # Datos serie
-    dates = [s["date"] for s in report["series"]]
-    rows_tot = [s.get("rows_total", 0) for s in report["series"]]
-    csv_cnt = [s.get("csv_count", 0) for s in report["series"]]
+def as_html_list(items):
+    return "\n".join([f"<li><code>{x}</code></li>" for x in items]) if items else "<li><em>(vacío)</em></li>"
 
-    dq = report["dq"]
-    status = dq.get("status","UNKNOWN")
-    badge = {"OK":"✅ OK", "WARN":"⚠️ WARN", "FAIL":"❌ FAIL"}.get(status, "❓ UNKNOWN")
+def as_links_list(links):
+    if not links:
+        return "<li><em>(sin enlaces)</em></li>"
+    out = []
+    for l in links:
+        name = (l.get("name") or "link").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        url = l.get("url") or "#"
+        out.append(f'<li><a href="{url}" target="_blank" rel="noopener">{name}</a></li>')
+    return "\n".join(out)
 
-    latest_manifest = html.escape(report.get("latest_manifest","—"))
-    master_yes = "sí" if report.get("master_csv") else "no"
-    zips_html = "\n".join(f"<code>{html.escape(z)}</code>" for z in report.get("zips", []))
-    links_html = "\n".join(f'<a href="{html.escape(u)}" target="_blank">{html.escape(u.split("/")[-1])}</a>'
-                           for u in report.get("drive_links", []))
+def build_chart_config(report):
+    # Gráfica simple: nº de zips por categoría + warn/fail
+    labels = ["ZIPs", "WARN", "FAIL"]
+    data = [
+        len(report["files"]["zips"]),
+        int(report["dq"]["warn"] or 0),
+        int(report["dq"]["fail"] or 0),
+    ]
+    cfg = {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [{
+                "label": "Resumen",
+                "data": data
+            }]
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "legend": { "display": True }
+            },
+            "scales": {
+                "y": { "beginAtZero": True }
+            }
+        }
+    }
+    return json.dumps(cfg, ensure_ascii=False)
 
-    # HTML mínimo con Chart.js desde CDN
-    return f"""<!DOCTYPE html>
+def build_html(report):
+    updated = report["updated_utc"]
+    badge = status_badge(report["dq"]["status"])
+    manifest = report["files"]["manifest"] or "—"
+    master_yes = "sí" if report["files"]["master_csv"] else "no"
+    zips_html = as_html_list(report["files"]["zips"])
+    links_html = as_links_list(report["drive_links"])
+    chart_config = build_chart_config(report)
+
+    # Usamos string.Template para evitar conflictos de llaves con JS
+    tpl = Template("""<!doctype html>
 <html lang="es">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Fran Ops · Data Quality</title>
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>
-    body{{font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif; margin:24px;}}
-    h1{{margin:0 0 8px 0}}
-    .meta{{color:#666;margin-bottom:18px}}
-    section{{margin:18px 0}}
-    .card{{border:1px solid #e5e7eb;border-radius:8px;padding:16px}}
-    code{{background:#f6f8fa;padding:2px 6px;border-radius:4px}}
-    .grid{{display:grid; gap:16px}}
-    @media(min-width:900px){{ .grid.two{{grid-template-columns:1fr 1fr}} }}
-    canvas{{max-width:100%;}}
-    .badge{{display:inline-block;padding:4px 8px;border-radius:14px;background:#f1f5f9}}
-  </style>
+<meta charset="utf-8">
+<title>Fran Ops · Data Quality</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<style>
+ body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:20px;color:#111}
+ h1{font-size:28px;margin:0 0 6px}
+ .muted{color:#666}
+ section{margin:18px 0;padding:16px;border:1px solid #eee;border-radius:8px}
+ code{background:#f6f8fa;padding:2px 6px;border-radius:4px}
+ details{margin-top:8px}
+ .badge{display:inline-block;padding:4px 10px;border-radius:999px;background:#efefef}
+</style>
 </head>
 <body>
   <h1>Fran Ops · Data Quality</h1>
-  <div class="meta">Actualizado: {html.escape(report.get("generated_at",""))}</div>
+  <div class="muted">Actualizado: <strong>$updated</strong></div>
 
-  <section class="card">
+  <section>
     <h2>Estado DQ</h2>
-    <p>Estado: <span class="badge">{badge}</span>
-      <small>(warn={dq.get("warn",0)}, fail={dq.get("fail",0)})</small>
-    </p>
-    <details><summary>Ver informe completo</summary>
-      <pre style="white-space:pre-wrap">{html.escape(dq.get("raw",""))}</pre>
-    </details>
+    <p>Estado: <span class="badge">$badge</span> <span class="muted">(warn=$warn, fail=$fail)</span></p>
+    <canvas id="chart" width="600" height="260"></canvas>
   </section>
 
-  <section class="card">
+  <section>
     <h2>Archivos</h2>
-    <p>Manifest: <code>{latest_manifest}</code><br/>Master CSV: {master_yes}</p>
+    <p>Manifest: <code>$manifest</code><br/>Master CSV: <strong>$master_yes</strong></p>
     <h3>ZIPs</h3>
-    <div>{zips_html or "—"}</div>
-    <h3>Enlaces de Drive</h3>
-    <div>{links_html or "—"}</div>
+    <ul>
+      $zips_html
+    </ul>
   </section>
 
-  <section class="grid two">
-    <div class="card">
-      <h3>Evolución · Total de filas (suma manifest)</h3>
-      <canvas id="rowsChart"></canvas>
-    </div>
-    <div class="card">
-      <h3>Evolución · Nº de CSVs en manifest</h3>
-      <canvas id="csvChart"></canvas>
-    </div>
+  <section>
+    <h2>Enlaces de Drive</h2>
+    <ul>
+      $links_html
+    </ul>
   </section>
 
-<script>
-const labels = {json.dumps(dates)};
-const rowsData = {json.dumps(rows_tot)};
-const csvData = {json.dumps(csv_cnt)};
+  <details>
+    <summary>Ver JSON completo</summary>
+    <pre><code>$report_pretty</code></pre>
+  </details>
 
-function buildLineChart(ctx, labels, data, label){
-  return new Chart(ctx, {{
-    type: 'line',
-    data: {{
-      labels: labels,
-      datasets: [{{
-        label: label,
-        data: data,
-        tension: 0.25,
-        pointRadius: 2
-      }}]
-    }},
-    options: {{
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {{
-        x: {{ ticks: {{ maxRotation: 0, autoSkip: true }} }},
-        y: {{ beginAtZero: true }}
-      }},
-      plugins: {{
-        legend: {{ display: true }},
-        tooltip: {{ mode: 'index', intersect: false }}
-      }}
-    }}
-  }});
-}
-
-buildLineChart(document.getElementById('rowsChart'), labels, rowsData, 'Filas totales');
-buildLineChart(document.getElementById('csvChart'), labels, csvData, 'CSV en manifest');
-</script>
-
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+    (function(){
+      const ctx = document.getElementById('chart').getContext('2d');
+      const cfg = $chart_config;
+      new Chart(ctx, cfg);
+    })();
+  </script>
 </body>
-</html>
-"""
+</html>""")
 
-# ------------------------ main --------------------------------------
+    html = tpl.substitute(
+        updated=updated,
+        badge=badge,
+        warn=report["dq"]["warn"],
+        fail=report["dq"]["fail"],
+        manifest=manifest,
+        master_yes=master_yes,
+        zips_html=zips_html,
+        links_html=links_html,
+        report_pretty=json.dumps(report, ensure_ascii=False, indent=2),
+        chart_config=chart_config
+    )
+    Path("docs").mkdir(parents=True, exist_ok=True)
+    with open(DOCS_HTML, "w", encoding="utf-8") as f:
+        f.write(html)
+
 def main():
-    os.makedirs(DIST, exist_ok=True)
-    os.makedirs(DOCS_DIR, exist_ok=True)
-
-    report = build_report()
-
-    # report.json
-    with open(REPORT_JSON, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-
-    # docs/index.html
-    html_str = render_html(report)
-    with open(HTML_OUT, "w", encoding="utf-8") as f:
-        f.write(html_str)
-
+    report = build_report_json()
+    build_html(report)
     print(f"✓ JSON: {REPORT_JSON}")
-    print(f"✓ HTML: {HTML_OUT}")
+    print(f"✓ HTML: {DOCS_HTML}")
 
 if __name__ == "__main__":
     main()
-
-feat(report): versión extendida de make_report.py con generación de report.json y panel DQ enriquecido
