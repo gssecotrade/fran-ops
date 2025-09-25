@@ -46,11 +46,13 @@ jobs:
       # ---------- Extract: Sheets -> CSV ----------
       - name: Sheets -> CSV (Loterías)
         env:
-          # OAuth (si lo usa tu upload a Drive u otros scripts)
+          # ID de la Hoja de Google con todos los tabs (la misma que usas para Control_Pipeline)
+          SHEETS_SPREADSHEET_ID: ${{ secrets.CONTROL_SHEET_ID }}
+          # OAuth (si lo usan otros scripts)
           GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
-          # GOOGLE_SA_JSON ya está en $GITHUB_ENV desde el paso anterior
+          # GOOGLE_SA_JSON ya quedó exportado por "Prepare Google SA"
         run: |
           python ops/scripts/sheets_to_csv.py
 
