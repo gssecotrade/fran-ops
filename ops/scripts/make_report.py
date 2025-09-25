@@ -274,3 +274,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+feat(report): versión extendida de make_report.py con generación de report.json y panel DQ enriquecido
