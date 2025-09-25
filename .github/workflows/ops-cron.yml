@@ -3,13 +3,8 @@ name: Fran Ops — Scheduler
 on:
   workflow_dispatch:
   schedule:
-    # ⚠️ UTC. Si quieres 08:00 hora de Madrid (CET/CEST),
-    # usa 07:00 UTC (invierno) o 06:00 UTC (verano).
-    - cron: '0 8 * * *'
-
-concurrency:
-  group: fran-ops-main
-  cancel-in-progress: false
+    # 08:00 Europe/Madrid (ajusta si prefieres otra hora)
+    - cron: '0 7 * * *'
 
 permissions:
   contents: read
@@ -17,11 +12,10 @@ permissions:
   id-token: write
 
 env:
-  PYTHON_VERSION: '3.11'
   DIST_DIR: dist
 
 jobs:
-  pipeline:
+  run_pipeline:
     name: Run Fran Ops pipeline
     runs-on: ubuntu-latest
 
@@ -32,107 +26,107 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.11'
 
-      - name: Install deps
+      - name: Install deps (ligero)
         run: |
           python -m pip install --upgrade pip
           pip install -r ops/scripts/requirements.txt || true
-          pip install pandas gspread google-auth google-api-python-client
+          # fallback por si tu requirements no contiene todo
+          pip install pandas gspread google-auth google-auth-oauthlib google-api-python-client
 
-      - name: Sheets -> CSV
+      # ---------- Extract: Sheets -> CSV ----------
+      - name: Sheets -> CSV (Loterías)
         env:
-          GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }} # opcional
-          GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }} # << TU SECRETO
+          # Si tu script usa OAuth de Drive/Sheets
+          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
+          # Si usas SA en algún script, lo tendrás decodificado más abajo si hace falta
         run: |
-          python ops/scripts/sheets_to_csv.py || true
+          python ops/scripts/sheets_to_csv.py
 
+      # ---------- Normalize ----------
       - name: Normalize
         run: |
           python ops/scripts/normalize_loterias.py
 
+      # ---------- Data Quality ----------
       - name: Data Quality
         run: |
-          python ops/scripts/dq_loterias.py || true
+          python ops/scripts/dq_loterias.py
 
+      # ---------- ZIP all ----------
       - name: ZIP all
         run: |
           bash ops/scripts/zip_all.sh
 
-      - name: Upload to Drive
+      # ---------- Upload to Drive ----------
+      - name: Upload zips to Google Drive
         env:
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-          GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_FOLDER_ID:           ${{ secrets.GDRIVE_FOLDER_ID }}
+          GDRIVE_OAUTH_CLIENT_ID:     ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_OAUTH_REFRESH_TOKEN: ${{ secrets.GDRIVE_OAUTH_REFRESH_TOKEN }}
         run: |
-          python ops/scripts/upload_to_gdrive.py || true
+          python ops/scripts/upload_to_gdrive.py
 
+      # ---------- Build report.json + docs/index.html (Panel DQ) ----------
       - name: Build report.json + docs/index.html
         run: |
           python ops/scripts/make_report.py
-          echo "✓ Generado $(pwd)/docs/index.html"
-          test -f dist/report.json || (echo "report.json faltante" && exit 1)
 
-      - name: Save dist artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: |
-            dist/**
-            !dist/**/*.tmp
-
-  deploy-pages:
-    name: Deploy DQ Panel (GitHub Pages)
-    runs-on: ubuntu-latest
-    needs: pipeline
-
-    steps:
-      - uses: actions/checkout@v4
-
+      # ---------- Publicar panel en GitHub Pages ----------
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload docs artifact
+      - name: Upload artifact for Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs
 
+  # =========================
+  # Despliegue de GitHub Pages
+  # =========================
+  deploy:
+    name: Deploy DQ Panel (GitHub Pages)
+    needs: [run_pipeline]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to Pages
         id: deployment
         uses: actions/deploy-pages@v4
 
-  update-control-sheet:
-    name: Update control sheet
+  # ============================================
+  # Scrape LAE con Chromium y actualizar el Sheet
+  # ============================================
+  lae_scrape:
+    name: Actualiza históricos (LAE -> Google Sheet)
+    needs: [run_pipeline] # ejecuta tras el pipeline; cámbialo si prefieres otro orden
     runs-on: ubuntu-latest
-    needs: [pipeline]   # necesita el artifact "dist"
-    if: ${{ !cancelled() }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download dist artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: '3.11'
 
-      - name: Install deps (gspread)
+      - name: Install Python deps (gspread + Playwright)
         run: |
           python -m pip install --upgrade pip
-          pip install gspread google-auth
+          pip install gspread google-auth playwright
+          python -m playwright install --with-deps chromium
 
-      - name: Update Google Sheet (Control_Pipeline)
+      # El script usa el SA en base64 y escribe en tu Sheet de control
+      - name: Scrape LAE results -> Google Sheet
         env:
-          CONTROL_SHEET_ID: ${{ secrets.CONTROL_SHEET_ID }}
-          GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}   # << clave
-          CONTROL_SHEET_TAB: Control_Pipeline
-          PANEL_URL: https://gssecotrade.github.io/fran-ops/
-          GITHUB_RUN_ID: ${{ github.run_id }}
+          CONTROL_SHEET_ID:     ${{ secrets.CONTROL_SHEET_ID }}
+          GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
         run: |
-          python ops/scripts/update_control_sheet.py
+          python ops/scripts/fetch_lae_results.py
