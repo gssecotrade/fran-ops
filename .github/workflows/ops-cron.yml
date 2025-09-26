@@ -2,11 +2,9 @@ name: Fran Ops — Scheduler
 
 on:
   workflow_dispatch:
-  # Programa diario (UTC). Cambia la hora si quieres.
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 8 * * *'   # 08:00 UTC diario
 
-# ⬅️ PERMISOS NECESARIOS PARA QUE EL BOT PUEDA HACER PUSH
 permissions:
   contents: write
   pages: write
@@ -15,34 +13,38 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true   # deja el token configurado para git push
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install deps (ligero)
+      - name: Install deps
         run: |
-          if [ -f ops/requirements.txt ]; then
-            pip install -r ops/requirements.txt
-          else
-            pip install requests
-          fi
+          pip install requests
+
+      - name: Debug tree
+        run: |
+          pwd
+          ls -la
+          echo '--- ops/scripts ---'
+          ls -la ops/scripts || true
 
       - name: Build lae_latest.json
         run: |
           mkdir -p docs/api
-          python ops/fetch_lae_latest.py --out docs/api/lae_latest.json
-          echo "== head =="
+          python ./ops/scripts/fetch_lae_latest.py --out docs/api/lae_latest.json
+          echo '---- head ----'
           head -c 400 docs/api/lae_latest.json || true
-          echo ""
-          echo "== size =="
+          echo
+          echo '---- size ----'
           wc -c docs/api/lae_latest.json
 
       - name: Auto-commit lae_latest.json (pages)
