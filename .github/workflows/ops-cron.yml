@@ -1,86 +1,84 @@
-name: OPS CRON
+name: ops-cron
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # cada 6 horas
+    # L-V cada 30 minutos de 07:00 a 21:00 UTC (ajusta si quieres)
+    - cron: "*/30 7-21 * * 1-5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ops-cron
+  cancel-in-progress: false
 
 jobs:
-  # =========================
-  # Últimos sorteos (latest)
-  # =========================
   build-latest:
-    name: Build latest
+    name: Build latest JSON
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (requests, bs4)
+      - name: Install deps (requests, bs4, lxml)
         run: |
           python -m pip install --upgrade pip
-          pip install requests bs4
+          pip install requests bs4 lxml
 
-      - name: Build lae_latest.json
+      - name: Build docs/api/lae_latest.json
         run: |
           mkdir -p docs/api
-          echo "[build] Generando lae_latest.json ..."
-          python OPS/scripts/fetch_lae_latest.py docs/api/lae_latest.json
+          python ops/scripts/fetch_lae_latest.py docs/api/lae_latest.json
           echo "---- head ----"
           head -n 40 docs/api/lae_latest.json || true
           echo "---- size ----"
           wc -c docs/api/lae_latest.json || true
 
-      - name: Commit & Push lae_latest.json
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          file_pattern: docs/api/lae_latest.json
-          commit_message: "chore: update docs/api/lae_latest.json"
-          commit_user_name: ghsseco
-          commit_user_email: 199840932+gssecotrade@users.noreply.github.com
-          push_options: "--force-with-lease"
+      - name: Commit & Push latest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/api/lae_latest.json
+          git commit -m "ops: update docs/api/lae_latest.json" || echo "Nothing to commit"
+          git push
 
-  # =========================
-  # Histórico completo
-  # =========================
   build-historic:
-    name: Build historic
+    name: Build historic JSON
+    needs: build-latest
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (requests, bs4)
+      - name: Install deps (requests, bs4, lxml)
         run: |
           python -m pip install --upgrade pip
-          pip install requests bs4
+          pip install requests bs4 lxml
 
-      - name: Build lae_historico.json
+      - name: Build docs/api/lae_historico.json
         run: |
           mkdir -p docs/api
-          echo "[build] Generando histórico completo..."
-          # IMPORTANTE: ruta correcta al script
-          python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          python ops/scripts/fetch_lae_historic.py docs/api/lae_historico.json
           echo "---- head ----"
           head -n 40 docs/api/lae_historico.json || true
           echo "---- size ----"
           wc -c docs/api/lae_historico.json || true
 
-      - name: Commit & Push lae_historico.json
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          file_pattern: docs/api/lae_historico.json
-          commit_message: "chore: update docs/api/lae_historico.json"
-          commit_user_name: ghsseco
-          commit_user_email: 199840932+gssecotrade@users.noreply.github.com
-          push_options: "--force-with-lease"
+      - name: Commit & Push historic
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/api/lae_historico.json
+          git commit -m "ops: update docs/api/lae_historico.json" || echo "Nothing to commit"
+          git push
