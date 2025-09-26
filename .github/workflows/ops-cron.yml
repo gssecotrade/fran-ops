@@ -3,8 +3,7 @@ name: ops-cron
 on:
   workflow_dispatch:
   schedule:
-    # Ejecuta todos los días a las 05:15 UTC (ajústalo si quieres)
-    - cron: "15 5 * * *"
+    - cron: "15 5 * * *"   # diario 05:15 UTC
 
 permissions:
   contents: write
@@ -18,51 +17,76 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout completo para poder hacer pull/commit/push limpias
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2) Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 3) Dependencias de scraping / parseo
       - name: Install deps (requests, bs4, lxml)
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      # 4) Generar lae_latest.json
+      - name: Locate OPS/scripts (case-insensitive) and show tree
+        id: locate
+        shell: bash
+        run: |
+          echo "---- repo tree (top) ----"
+          ls -la
+          echo "-------------------------"
+          echo "---- list tracked files ----"
+          git ls-files | sed 's/^/  /'
+          echo "---------------------------"
+
+          # Busca case-insensitive los scripts dentro de *ops/ o OPS/*
+          LATEST=$(git ls-files | grep -i '^ops/scripts/fetch_lae_latest\.py$' || true)
+          HIST=$(git ls-files   | grep -i '^ops/scripts/fetch_lae_historic\.py$' || true)
+
+          if [ -z "$LATEST" ]; then
+            echo "ERROR: no encuentro fetch_lae_latest.py (ni en ops/ ni OPS/)."
+            exit 1
+          fi
+          if [ -z "$HIST" ]; then
+            echo "ERROR: no encuentro fetch_lae_historic.py (ni en ops/ ni OPS/)."
+            exit 1
+          fi
+
+          echo "SCRIPT_LATEST=$LATEST" >> $GITHUB_ENV
+          echo "SCRIPT_HIST=$HIST"     >> $GITHUB_ENV
+          echo "Usaré:"
+          echo "  latest: $LATEST"
+          echo "  hist  : $HIST"
+
       - name: Build docs/api/lae_latest.json
+        shell: bash
         run: |
           mkdir -p docs/api
           echo "[build] Generando lae_latest.json ..."
-          python OPS/scripts/fetch_lae_latest.py docs/api/lae_latest.json
+          python "$SCRIPT_LATEST" docs/api/lae_latest.json
           echo "---- head ----"
           head -n 30 docs/api/lae_latest.json || true
-          echo "--------------"
 
-      # 5) Generar lae_historico.json
       - name: Build docs/api/lae_historico.json
+        shell: bash
         run: |
           mkdir -p docs/api
-          echo "[build] Generando histórico completo ..."
-          python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          echo "[build] Generando lae_historico.json ..."
+          python "$SCRIPT_HIST" docs/api/lae_historico.json
           echo "---- head ----"
           head -n 30 docs/api/lae_historico.json || true
-          echo "--------------"
 
-      # 6) Commit & push de ambos ficheros (un único empuje)
-      - name: Commit & Push both JSONs
+      - name: Commit & Push both JSONs (atomic)
+        shell: bash
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Evita rechazos por diverger con main
+          # Alinea con main para evitar rechazos
           git pull --ff-only origin main || true
 
           git add docs/api/lae_latest.json docs/api/lae_historico.json
