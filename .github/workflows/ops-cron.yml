@@ -3,8 +3,8 @@ name: ops-cron
 on:
   workflow_dispatch:
   schedule:
-    # L-V cada 30 minutos de 07:00 a 21:00 UTC (ajusta si quieres)
-    - cron: "*/30 7-21 * * 1-5"
+    # Ejecuta todos los días a las 05:15 UTC (ajústalo si quieres)
+    - cron: "15 5 * * *"
 
 permissions:
   contents: write
@@ -14,71 +14,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-latest:
-    name: Build latest JSON
+  build-and-publish:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Setup Python
+    steps:
+      # 1) Checkout completo para poder hacer pull/commit/push limpias
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2) Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3) Dependencias de scraping / parseo
       - name: Install deps (requests, bs4, lxml)
         run: |
           python -m pip install --upgrade pip
-          pip install requests bs4 lxml
+          pip install requests beautifulsoup4 lxml
 
+      # 4) Generar lae_latest.json
       - name: Build docs/api/lae_latest.json
         run: |
           mkdir -p docs/api
-          python ops/scripts/fetch_lae_latest.py docs/api/lae_latest.json
+          echo "[build] Generando lae_latest.json ..."
+          python OPS/scripts/fetch_lae_latest.py docs/api/lae_latest.json
           echo "---- head ----"
-          head -n 40 docs/api/lae_latest.json || true
-          echo "---- size ----"
-          wc -c docs/api/lae_latest.json || true
+          head -n 30 docs/api/lae_latest.json || true
+          echo "--------------"
 
-      - name: Commit & Push latest
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/api/lae_latest.json
-          git commit -m "ops: update docs/api/lae_latest.json" || echo "Nothing to commit"
-          git push
-
-  build-historic:
-    name: Build historic JSON
-    needs: build-latest
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps (requests, bs4, lxml)
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests bs4 lxml
-
+      # 5) Generar lae_historico.json
       - name: Build docs/api/lae_historico.json
         run: |
           mkdir -p docs/api
-          python ops/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          echo "[build] Generando histórico completo ..."
+          python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
           echo "---- head ----"
-          head -n 40 docs/api/lae_historico.json || true
-          echo "---- size ----"
-          wc -c docs/api/lae_historico.json || true
+          head -n 30 docs/api/lae_historico.json || true
+          echo "--------------"
 
-      - name: Commit & Push historic
+      # 6) Commit & push de ambos ficheros (un único empuje)
+      - name: Commit & Push both JSONs
         run: |
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/api/lae_historico.json
-          git commit -m "ops: update docs/api/lae_historico.json" || echo "Nothing to commit"
-          git push
+
+          # Evita rechazos por diverger con main
+          git pull --ff-only origin main || true
+
+          git add docs/api/lae_latest.json docs/api/lae_historico.json
+          if git diff --cached --quiet; then
+            echo "No hay cambios que publicar."
+            exit 0
+          fi
+
+          git commit -m "ops: update docs/api (latest + historico)"
+          git push origin HEAD:main
