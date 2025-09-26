@@ -1,0 +1,38 @@
+name: Build Historic JSON
+
+on:
+  workflow_dispatch:   # ejecución manual
+  schedule:
+    - cron: "0 5 * * 1"   # opcional, cada lunes a las 5am UTC
+
+jobs:
+  build-historic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4
+
+      - name: Build lae_historico.json
+        run: |
+          mkdir -p docs/api
+          echo "[build] Generando histórico completo..."
+          python scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          echo "[build] Histórico generado en docs/api/lae_historico.json"
+
+      - name: Commit & Push lae_historico.json
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "github-actions"
+          git add docs/api/lae_historico.json
+          git commit -m "Update lae_historico.json (full historic)" || echo "No changes"
+          git push
