@@ -1,233 +1,173 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-fetch_lae_latest.py
--------------------------------------------------
-Descarga el ÚLTIMO sorteo de PRIMITIVA, BONOLOTO,
-EL GORDO y EUROMILLONES desde la web de LAE,
-con fallback a un proxy sin JS y SIEMPRE
-genera un JSON de salida aunque falle algún juego.
 
-Salida: {"generated_at": "...Z", "results": [...], "errors":[...]}
-Uso:    python ops/scripts/fetch_lae_latest.py --out docs/api/lae_latest.json
+"""
+Genera docs/api/lae_latest.json con guard-rails:
+- Estructura: { generated_at, results: [...], errors: [...] }
+- NO publica sorteos sin fecha (items con "date" vacío o nulo se descartan)
+- Si no hay ningún sorteo válido, publica results=[] y deja constancia en errors
+- Preparado para ampliarse con scrapers reales; por ahora intenta obtener una
+  fuente JSON ya existente (si existe) para mantener compatibilidad.
+
+Salida: docs/api/lae_latest.json
 """
 
-import sys, re, json, argparse, datetime, time
-from typing import Dict, Any, List, Tuple, Optional
+from __future__ import annotations
+import os
+import sys
+import json
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 try:
     import requests
-    from bs4 import BeautifulSoup  # type: ignore
-except Exception as e:
-    # Emergencia: si faltan deps, devolvemos placeholder pero NO reventamos el job
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(json.dumps({
-        "generated_at": now,
-        "results": [],
-        "errors": [f"IMPORT_ERROR:{repr(e)}"]
-    }, ensure_ascii=False, indent=2))
-    sys.exit(0)
+except Exception:
+    print("Installing dependencies (requests)...", flush=True)
+    os.system(f"{sys.executable} -m pip install --upgrade pip >/dev/null 2>&1")
+    os.system(f"{sys.executable} -m pip install requests >/dev/null 2>&1")
+    import requests  # type: ignore
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0 Safari/537.36"
-)
-TIMEOUT = 25
 
-# Endpoints “visibles” (suelen 403 sin cookies) y proxy texto
-PAGES: Dict[str, Dict[str, str]] = {
-    "PRIMITIVA": {
-        "direct": "https://www.loteriasyapuestas.es/es/la-primitiva",
-        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/la-primitiva",
-    },
-    "BONOLOTO": {
-        "direct": "https://www.loteriasyapuestas.es/es/bonoloto",
-        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/bonoloto",
-    },
-    "GORDO": {
-        "direct": "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva",
-        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva",
-    },
-    "EURO": {
-        "direct": "https://www.loteriasyapuestas.es/es/euromillones",
-        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/euromillones",
-    },
-}
+# -------------------------
+# Config
+# -------------------------
 
-HEADERS = {
-    "User-Agent": UA,
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-}
+OUT_PATH = "docs/api/lae_latest.json"
 
-def fetch_text(url: str) -> Tuple[Optional[str], Optional[str]]:
-    """Devuelve (texto, origen) usando directo y, si 403/errores, proxy."""
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if r.ok and r.text:
-            return r.text, "direct"
-        # Si nos devuelven 403/redirect raro, pasamos al proxy
-    except requests.RequestException:
-        pass
-    # Fallback: proxy
-    try:
-        prox = PAGES  # acceso global
-        # mapear la “direct” al “proxy”
-        # (cuando nos pasan ya proxy, no duplicamos)
-        if "r.jina.ai" in url:
-            rp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            if rp.ok and rp.text:
-                return rp.text, "proxy"
-        else:
-            # buscar proxy equivalente
-            for g, d in PAGES.items():
-                if d["direct"] == url:
-                    rp = requests.get(d["proxy"], headers=HEADERS, timeout=TIMEOUT)
-                    if rp.ok and rp.text:
-                        return rp.text, "proxy"
-    except requests.RequestException:
-        pass
-    return None, None
+# Fuentes candidatas (se pueden añadir más)
+CANDIDATE_SOURCES = [
+    # 1) variable de entorno para pruebas/manual
+    os.getenv("LAE_SOURCE_JSON") or "",
+    # 2) rama principal del propio repo (si existiera un JSON previo)
+    "https://raw.githubusercontent.com/gssecotrade/fran-ops/main/docs/api/lae_latest.json",
+    # 3) GitHub Pages del repo (si está publicado)
+    "https://gssecotrade.github.io/fran-ops/docs/api/lae_latest.json",
+]
 
-# ---------- Parsers (robustos por regex) ----------
 
-DATE_RX = re.compile(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
+# -------------------------
+# Utilidades
+# -------------------------
 
-def parse_numbers_generic(text: str, how_many: int) -> List[int]:
-    """Extrae números (hasta how_many) robustamente del texto (primero los más probables 1..50)."""
-    # Priorizar números de 1-50 (quitan años/horas)
-    nums = [int(x) for x in re.findall(r"\b([1-9]|[1-4]\d|50)\b", text)]
-    out: List[int] = []
-    for n in nums:
-        if n not in out:
-            out.append(n)
-        if len(out) >= how_many:
-            break
-    return out
+def utc_now_iso() -> str:
+    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def normalize_date(s: str) -> Optional[str]:
-    m = DATE_RX.search(s)
-    if not m:
+
+def http_get_json(url: str, timeout: int = 20) -> Optional[Dict[str, Any]]:
+    if not url:
         return None
-    d = m.group(1).replace('-', '/')
-    # dd/mm/yyyy
-    parts = d.split('/')
-    if len(parts) != 3:
-        return None
-    dd, mm, yy = parts
-    dd = dd.zfill(2); mm = mm.zfill(2)
-    if len(yy) == 2:
-        yy = ('20' + yy) if int(yy) < 70 else ('19' + yy)
     try:
-        dt = datetime.datetime(int(yy), int(mm), int(dd))
-        return dt.strftime("%Y-%m-%d")
-    except ValueError:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "fran-ops/gha"})
+        if r.status_code >= 200 and r.status_code < 300:
+            return r.json()
+        return None
+    except Exception:
         return None
 
-def parse_primitiva(html: str) -> Dict[str, Any]:
-    # Buscamos 6 + complementario + reintegro
-    date = normalize_date(html) or ""
-    # Heurística: 8 números (6 + 1 + 1)
-    nums = parse_numbers_generic(html, 8)
-    res = {
-        "game": "PRIMITIVA",
-        "date": date,
-        "numbers": nums[:6],
-        "complementario": nums[6] if len(nums) > 6 else None,
-        "reintegro": nums[7] if len(nums) > 7 else None,
-    }
-    return res
 
-def parse_bonoloto(html: str) -> Dict[str, Any]:
-    date = normalize_date(html) or ""
-    nums = parse_numbers_generic(html, 8)
-    return {
-        "game": "BONOLOTO",
-        "date": date,
-        "numbers": nums[:6],
-        "complementario": nums[6] if len(nums) > 6 else None,
-        "reintegro": nums[7] if len(nums) > 7 else None,
-    }
+def ensure_dir(path: str) -> None:
+    d = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
 
-def parse_gordo(html: str) -> Dict[str, Any]:
-    # El Gordo: 5 números + número clave/reintegro
-    date = normalize_date(html) or ""
-    nums = parse_numbers_generic(html, 6)
-    return {
-        "game": "GORDO",
-        "date": date,
-        "numbers": nums[:5],
-        "clave": nums[5] if len(nums) > 5 else None,
-    }
 
-def parse_euro(html: str) -> Dict[str, Any]:
-    # Euromillones: 5 números + 2 estrellas
-    date = normalize_date(html) or ""
-    nums = parse_numbers_generic(html, 7)
-    return {
-        "game": "EURO",
-        "date": date,
-        "numbers": nums[:5],
-        "estrellas": nums[5:7] if len(nums) >= 7 else [],
-    }
+def canonical_game_key(raw: Any) -> str:
+    if not raw:
+        return ""
+    s = str(raw).strip().lower()
+    if "primitiva" in s:
+        return "PRIMITIVA"
+    if "bonoloto" in s:
+        return "BONOLOTO"
+    if "gordo" in s:
+        return "GORDO"
+    if "euromillon" in s or ("euro" in s and "millon" in s):
+        return "EURO"
+    if raw in ("PRIMITIVA", "BONOLOTO", "GORDO", "EURO"):
+        return str(raw)
+    return ""
 
-PARSERS = {
-    "PRIMITIVA": parse_primitiva,
-    "BONOLOTO":  parse_bonoloto,
-    "GORDO":     parse_gordo,
-    "EURO":      parse_euro,
-}
 
-def build_one(game: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    urls = PAGES[game]
-    html, origin = fetch_text(urls["direct"])
-    if not html:
-        html, origin = fetch_text(urls["proxy"])
-    if not html:
-        return None, f"{game}: fetch_failed"
-    try:
-        parsed = PARSERS[game](html)
-        parsed["source"] = origin
-        return parsed, None
-    except Exception as e:
-        return None, f"{game}: parse_failed {repr(e)}"
+def results_from_any(json_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extrae un array de sorteos desde varias formas posibles."""
+    if not isinstance(json_obj, dict):
+        return []
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    r = json_obj.get("results")
+    if isinstance(r, list):
+        return [x for x in r if isinstance(x, dict)]
 
-    results: List[Dict[str, Any]] = []
+    if isinstance(r, dict):
+        out: List[Dict[str, Any]] = []
+        for k, v in r.items():
+            key = canonical_game_key(k)
+            if isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict):
+                        item.setdefault("game", key or item.get("game"))
+                        out.append(item)
+            elif isinstance(v, dict):
+                v.setdefault("game", key or v.get("game"))
+                out.append(v)
+        return out
+
+    return []
+
+
+# -------------------------
+# Generación del payload
+# -------------------------
+
+def build_payload() -> Dict[str, Any]:
     errors: List[str] = []
+    raw_items: List[Dict[str, Any]] = []
 
-    for g in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
-        item, err = build_one(g)
-        if item:
-            # sanity checks mínimos: fecha y nºs no vacíos
-            if not item.get("date"):
-                errors.append(f"{g}: no_date")
-            results.append(item)
+    # 1) Intentar fuentes candidatas (si alguna tuviera datos)
+    for url in CANDIDATE_SOURCES:
+        if not url:
+            continue
+        js = http_get_json(url)
+        if not js:
+            continue
+        raw_items = results_from_any(js)
+        if raw_items:
+            break
+
+    # 2) Guard-rail: filtrar items SIN fecha
+    valid: List[Dict[str, Any]] = []
+    for it in raw_items:
+        date_val = it.get("date") or it.get("fecha") or it.get("draw_date")
+        if date_val and str(date_val).strip() != "":
+            valid.append(it)
         else:
-            errors.append(err or f"{g}: unknown_error")
+            g = canonical_game_key(it.get("game"))
+            errors.append(f"{g or 'UNKNOWN'}: no_date")
 
+    # 3) Construir payload final
     payload = {
-        "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "results": results,
+        "generated_at": utc_now_iso(),
+        "results": valid,
         "errors": errors,
     }
+    return payload
 
-    # Garantizamos escritura SIEMPRE
-    try:
-        out_path = args.out
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        print(f"OK -> {out_path}")
-    except Exception as e:
-        # Último salvavidas: volcamos por stdout para que el paso pueda redirigirlo
-        print(json.dumps(payload, ensure_ascii=False))
-        print(f"WRITE_ERROR:{repr(e)}", file=sys.stderr)
+
+def main() -> int:
+    payload = build_payload()
+    ensure_dir(OUT_PATH)
+
+    with open(OUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    # Mensaje humano
+    total = len(payload.get("results", []))
+    print(f"[build] Escrito {OUT_PATH} con {total} sorteos válidos.")
+    if payload.get("errors"):
+        print("[build] Errores:", *payload["errors"], sep="\n  - ")
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
