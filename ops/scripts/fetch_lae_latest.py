@@ -1,119 +1,233 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Descarga el último sorteo de PRIMITIVA, BONOLOTO, GORDO y EUROMILLONES
-usando el proxy-caché público r.jina.ai para evitar 403 de LAE.
-Genera: dist/lae_latest.json
+fetch_lae_latest.py
+-------------------------------------------------
+Descarga el ÚLTIMO sorteo de PRIMITIVA, BONOLOTO,
+EL GORDO y EUROMILLONES desde la web de LAE,
+con fallback a un proxy sin JS y SIEMPRE
+genera un JSON de salida aunque falle algún juego.
+
+Salida: {"generated_at": "...Z", "results": [...], "errors":[...]}
+Uso:    python ops/scripts/fetch_lae_latest.py --out docs/api/lae_latest.json
 """
 
-import json, re, datetime as dt
-from urllib.parse import urljoin
+import sys, re, json, argparse, datetime, time
+from typing import Dict, Any, List, Tuple, Optional
 
-import requests
-from bs4 import BeautifulSoup
+try:
+    import requests
+    from bs4 import BeautifulSoup  # type: ignore
+except Exception as e:
+    # Emergencia: si faltan deps, devolvemos placeholder pero NO reventamos el job
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(json.dumps({
+        "generated_at": now,
+        "results": [],
+        "errors": [f"IMPORT_ERROR:{repr(e)}"]
+    }, ensure_ascii=False, indent=2))
+    sys.exit(0)
 
-BASE = "https://r.jina.ai/http://www.loteriasyapuestas.es/"
-PAGES = {
-    "PRIMITIVA": "es/la-primitiva",
-    "BONOLOTO":  "es/bonoloto",
-    "GORDO":     "es/el-gordo-de-la-primitiva",
-    "EURO":      "es/euromillones",
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
+TIMEOUT = 25
+
+# Endpoints “visibles” (suelen 403 sin cookies) y proxy texto
+PAGES: Dict[str, Dict[str, str]] = {
+    "PRIMITIVA": {
+        "direct": "https://www.loteriasyapuestas.es/es/la-primitiva",
+        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/la-primitiva",
+    },
+    "BONOLOTO": {
+        "direct": "https://www.loteriasyapuestas.es/es/bonoloto",
+        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/bonoloto",
+    },
+    "GORDO": {
+        "direct": "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva",
+        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva",
+    },
+    "EURO": {
+        "direct": "https://www.loteriasyapuestas.es/es/euromillones",
+        "proxy":  "https://r.jina.ai/http://www.loteriasyapuestas.es/es/euromillones",
+    },
 }
-UA = {"User-Agent": "Mozilla/5.0 (FranOps/1.0)"}
 
-RE_DATE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
-RE_NUM  = re.compile(r"\b\d{1,2}\b")
+HEADERS = {
+    "User-Agent": UA,
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 
-def fetch_html(path: str) -> str:
-    url = urljoin(BASE, path)
-    r = requests.get(url, headers=UA, timeout=30)
-    r.raise_for_status()
-    return r.text
+def fetch_text(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Devuelve (texto, origen) usando directo y, si 403/errores, proxy."""
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        if r.ok and r.text:
+            return r.text, "direct"
+        # Si nos devuelven 403/redirect raro, pasamos al proxy
+    except requests.RequestException:
+        pass
+    # Fallback: proxy
+    try:
+        prox = PAGES  # acceso global
+        # mapear la “direct” al “proxy”
+        # (cuando nos pasan ya proxy, no duplicamos)
+        if "r.jina.ai" in url:
+            rp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            if rp.ok and rp.text:
+                return rp.text, "proxy"
+        else:
+            # buscar proxy equivalente
+            for g, d in PAGES.items():
+                if d["direct"] == url:
+                    rp = requests.get(d["proxy"], headers=HEADERS, timeout=TIMEOUT)
+                    if rp.ok and rp.text:
+                        return rp.text, "proxy"
+    except requests.RequestException:
+        pass
+    return None, None
 
-def _first_date(text: str) -> str | None:
-    m = RE_DATE.search(text)
+# ---------- Parsers (robustos por regex) ----------
+
+DATE_RX = re.compile(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
+
+def parse_numbers_generic(text: str, how_many: int) -> List[int]:
+    """Extrae números (hasta how_many) robustamente del texto (primero los más probables 1..50)."""
+    # Priorizar números de 1-50 (quitan años/horas)
+    nums = [int(x) for x in re.findall(r"\b([1-9]|[1-4]\d|50)\b", text)]
+    out: List[int] = []
+    for n in nums:
+        if n not in out:
+            out.append(n)
+        if len(out) >= how_many:
+            break
+    return out
+
+def normalize_date(s: str) -> Optional[str]:
+    m = DATE_RX.search(s)
     if not m:
         return None
-    d, mth, y = map(int, m.groups())
-    return dt.date(y, mth, d).isoformat()
-
-def parse_6_plus_cr(text: str) -> tuple[list[int], int | None, int | None]:
-    """Para PRIMITIVA / BONOLOTO / GORDO: 6 números 1..49 + complementario (1..49) + reintegro (0..9)."""
-    nums = [int(x) for x in RE_NUM.findall(text)]
-    # Heurística: primeros 6 en 1..49
-    main = []
-    comp = None
-    rein = None
-    for n in nums:
-        if 1 <= n <= 49 and len(main) < 6 and n not in main:
-            main.append(n)
-    # Complementario: el siguiente 1..49
-    for n in nums:
-        if 1 <= n <= 49 and n not in main:
-            comp = n
-            break
-    # Reintegro: busca la palabra y coge 0..9 cercana
-    rein_m = re.search(r"Reintegro[^0-9]{0,10}(\d)", text, flags=re.I)
-    if rein_m:
-        rein = int(rein_m.group(1))
-    # Fallback si no detecta reintegro
-    if rein is None:
-        for n in nums:
-            if 0 <= n <= 9:
-                rein = n
-                break
-    return main, comp, rein
-
-def parse_euro(text: str) -> tuple[list[int], int | None, int | None]:
-    """EUROMILLONES: 5 números 1..50 + 2 estrellas (1..12).
-    Los guardamos como: main[5], comp=estrella1, rein=estrella2 (para encajar con la hoja)."""
-    nums = [int(x) for x in RE_NUM.findall(text)]
-    main = []
-    stars = []
-    for n in nums:
-        if 1 <= n <= 50 and len(main) < 5 and n not in main:
-            main.append(n)
-    for n in nums:
-        if 1 <= n <= 12 and len(stars) < 2:
-            stars.append(n)
-    comp = stars[0] if len(stars) >= 1 else None
-    rein = stars[1] if len(stars) >= 2 else None
-    return main, comp, rein
-
-def parse_game(html: str, game: str) -> dict | None:
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(" ", strip=True)
-    fecha = _first_date(text)
-    if not fecha:
+    d = m.group(1).replace('-', '/')
+    # dd/mm/yyyy
+    parts = d.split('/')
+    if len(parts) != 3:
         return None
-    if game == "EURO":
-        main, comp, rein = parse_euro(text)
-    else:
-        main, comp, rein = parse_6_plus_cr(text)
-    if len(main) < (5 if game == "EURO" else 6):
+    dd, mm, yy = parts
+    dd = dd.zfill(2); mm = mm.zfill(2)
+    if len(yy) == 2:
+        yy = ('20' + yy) if int(yy) < 70 else ('19' + yy)
+    try:
+        dt = datetime.datetime(int(yy), int(mm), int(dd))
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
         return None
+
+def parse_primitiva(html: str) -> Dict[str, Any]:
+    # Buscamos 6 + complementario + reintegro
+    date = normalize_date(html) or ""
+    # Heurística: 8 números (6 + 1 + 1)
+    nums = parse_numbers_generic(html, 8)
+    res = {
+        "game": "PRIMITIVA",
+        "date": date,
+        "numbers": nums[:6],
+        "complementario": nums[6] if len(nums) > 6 else None,
+        "reintegro": nums[7] if len(nums) > 7 else None,
+    }
+    return res
+
+def parse_bonoloto(html: str) -> Dict[str, Any]:
+    date = normalize_date(html) or ""
+    nums = parse_numbers_generic(html, 8)
     return {
-        "fecha": fecha,
-        "n": main,
-        "comp": comp,
-        "rein": rein,
+        "game": "BONOLOTO",
+        "date": date,
+        "numbers": nums[:6],
+        "complementario": nums[6] if len(nums) > 6 else None,
+        "reintegro": nums[7] if len(nums) > 7 else None,
     }
 
+def parse_gordo(html: str) -> Dict[str, Any]:
+    # El Gordo: 5 números + número clave/reintegro
+    date = normalize_date(html) or ""
+    nums = parse_numbers_generic(html, 6)
+    return {
+        "game": "GORDO",
+        "date": date,
+        "numbers": nums[:5],
+        "clave": nums[5] if len(nums) > 5 else None,
+    }
+
+def parse_euro(html: str) -> Dict[str, Any]:
+    # Euromillones: 5 números + 2 estrellas
+    date = normalize_date(html) or ""
+    nums = parse_numbers_generic(html, 7)
+    return {
+        "game": "EURO",
+        "date": date,
+        "numbers": nums[:5],
+        "estrellas": nums[5:7] if len(nums) >= 7 else [],
+    }
+
+PARSERS = {
+    "PRIMITIVA": parse_primitiva,
+    "BONOLOTO":  parse_bonoloto,
+    "GORDO":     parse_gordo,
+    "EURO":      parse_euro,
+}
+
+def build_one(game: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    urls = PAGES[game]
+    html, origin = fetch_text(urls["direct"])
+    if not html:
+        html, origin = fetch_text(urls["proxy"])
+    if not html:
+        return None, f"{game}: fetch_failed"
+    try:
+        parsed = PARSERS[game](html)
+        parsed["source"] = origin
+        return parsed, None
+    except Exception as e:
+        return None, f"{game}: parse_failed {repr(e)}"
+
 def main():
-    out = {"generated_at": dt.datetime.utcnow().isoformat() + "Z", "games": {}}
-    for g, path in PAGES.items():
-        try:
-            html = fetch_html(path)
-            parsed = parse_game(html, g)
-            if parsed:
-                out["games"][g] = parsed
-        except Exception as e:
-            out["games"][g] = {"error": repr(e)}
-    # Salida
-    import os, pathlib
-    pathlib.Path("dist").mkdir(parents=True, exist_ok=True)
-    with open("dist/lae_latest.json", "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    results: List[Dict[str, Any]] = []
+    errors: List[str] = []
+
+    for g in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
+        item, err = build_one(g)
+        if item:
+            # sanity checks mínimos: fecha y nºs no vacíos
+            if not item.get("date"):
+                errors.append(f"{g}: no_date")
+            results.append(item)
+        else:
+            errors.append(err or f"{g}: unknown_error")
+
+    payload = {
+        "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "results": results,
+        "errors": errors,
+    }
+
+    # Garantizamos escritura SIEMPRE
+    try:
+        out_path = args.out
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"OK -> {out_path}")
+    except Exception as e:
+        # Último salvavidas: volcamos por stdout para que el paso pueda redirigirlo
+        print(json.dumps(payload, ensure_ascii=False))
+        print(f"WRITE_ERROR:{repr(e)}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
