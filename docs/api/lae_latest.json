@@ -1,19 +1,20 @@
 {
-  "generated_at": "2025-09-26T15:39:43Z",
+  "generated_at": "2025-09-26T15:26:00Z",
   "results": [
     {
       "game": "PRIMITIVA",
       "date": "2025-09-25",
-      "numbers": [
-        1,
-        27,
-        2,
-        3,
-        8,
-        4
-      ],
+      "numbers": [1, 27, 2, 3, 8, 4],
       "complementario": 5,
       "reintegro": 6,
+      "source": "test"
+    },
+    {
+      "game": "BONOLOTO",
+      "date": "2025-09-24",
+      "numbers": [2, 5, 12, 19, 23, 31],
+      "complementario": 8,
+      "reintegro": 3,
       "source": "test"
     }
   ],
