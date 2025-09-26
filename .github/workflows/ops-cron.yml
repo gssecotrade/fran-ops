@@ -3,16 +3,15 @@ name: OPS CRON
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *" # cada 6 horas
+    - cron: "0 */6 * * *"   # cada 6 horas
 
 jobs:
-  # ============================================================
-  # 1) Build último sorteo (latest)
-  # ============================================================
+  # =========================
+  # Últimos sorteos (latest)
+  # =========================
   build-latest:
     name: Build latest
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -46,13 +45,12 @@ jobs:
           commit_user_email: 199840932+gssecotrade@users.noreply.github.com
           push_options: "--force-with-lease"
 
-  # ============================================================
-  # 2) Build histórico completo
-  # ============================================================
+  # =========================
+  # Histórico completo
+  # =========================
   build-historic:
     name: Build historic
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -71,6 +69,7 @@ jobs:
         run: |
           mkdir -p docs/api
           echo "[build] Generando histórico completo..."
+          # IMPORTANTE: ruta correcta al script
           python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
           echo "---- head ----"
           head -n 40 docs/api/lae_historico.json || true
