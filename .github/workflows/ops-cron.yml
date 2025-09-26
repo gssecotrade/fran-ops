@@ -1,19 +1,20 @@
-name: ops-cron
+name: OPS CRON
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"  # cada 30 min (ajusta si quieres)
-
-permissions:
-  contents: write   # NECESARIO para que github-actions[bot] pueda commitear
+    - cron: "0 */6 * * *" # cada 6 horas
 
 jobs:
+  # ============================================================
+  # 1) Build último sorteo (latest)
+  # ============================================================
   build-latest:
+    name: Build latest
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -24,22 +25,63 @@ jobs:
       - name: Install deps (requests, bs4)
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml
+          pip install requests bs4
 
       - name: Build lae_latest.json
         run: |
           mkdir -p docs/api
-          python ops/scripts/fetch_lae_latest.py --out docs/api/lae_latest.json
+          echo "[build] Generando lae_latest.json ..."
+          python OPS/scripts/fetch_lae_latest.py docs/api/lae_latest.json
           echo "---- head ----"
           head -n 40 docs/api/lae_latest.json || true
           echo "---- size ----"
-          wc -c docs/api/lae_latest.json
+          wc -c docs/api/lae_latest.json || true
 
-      - name: Auto-commit lae_latest.json (pages)
+      - name: Commit & Push lae_latest.json
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: update docs/api/lae_latest.json"
           file_pattern: docs/api/lae_latest.json
-          branch: main
-          commit_user_name: github-actions[bot]
-          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+          commit_message: "chore: update docs/api/lae_latest.json"
+          commit_user_name: ghsseco
+          commit_user_email: 199840932+gssecotrade@users.noreply.github.com
+          push_options: "--force-with-lease"
+
+  # ============================================================
+  # 2) Build histórico completo
+  # ============================================================
+  build-historic:
+    name: Build historic
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (requests, bs4)
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests bs4
+
+      - name: Build lae_historico.json
+        run: |
+          mkdir -p docs/api
+          echo "[build] Generando histórico completo..."
+          python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          echo "---- head ----"
+          head -n 40 docs/api/lae_historico.json || true
+          echo "---- size ----"
+          wc -c docs/api/lae_historico.json || true
+
+      - name: Commit & Push lae_historico.json
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          file_pattern: docs/api/lae_historico.json
+          commit_message: "chore: update docs/api/lae_historico.json"
+          commit_user_name: ghsseco
+          commit_user_email: 199840932+gssecotrade@users.noreply.github.com
+          push_options: "--force-with-lease"
