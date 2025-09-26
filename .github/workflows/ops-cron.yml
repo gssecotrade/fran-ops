@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   run:
@@ -31,21 +29,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml html5lib
 
-      - name: Debug tree
+      - name: Build lae_latest.json (robusto)
+        shell: bash
         run: |
-          pwd
-          ls -la
-          echo '--- ops/scripts ---'
-          ls -la ops/scripts || true
-
-      - name: Build lae_latest.json
-        run: |
+          set -e
           mkdir -p docs/api
-          python ./ops/scripts/fetch_lae_latest.py --out docs/api/lae_latest.json
-          echo '---- head ----'
+          # 1) Genera archivo (si falla la escritura, volcamos stdout y lo redirigimos)
+          python ops/scripts/fetch_lae_latest.py --out docs/api/lae_latest.json || {
+            echo "Python returned non-zero; trying stdout fallback..."
+            python ops/scripts/fetch_lae_latest.py --out /dev/null > docs/api/lae_latest.json || true
+          }
+          # 2) Último salvavidas: placeholder si no existe o está vacío
+          if [ ! -s docs/api/lae_latest.json ]; then
+            echo "WARNING: creating placeholder lae_latest.json"
+            printf '{"generated_at":"%s","results":[],"errors":["placeholder"]}\n' "$(date -u +%FT%TZ)" > docs/api/lae_latest.json
+          fi
+          echo "---- head ----"
           head -c 400 docs/api/lae_latest.json || true
           echo
-          echo '---- size ----'
+          echo "---- size ----"
           wc -c docs/api/lae_latest.json
 
       - name: Auto-commit lae_latest.json (pages)
