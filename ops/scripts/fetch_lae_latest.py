@@ -8,8 +8,9 @@ def main():
     results = []
     for game in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
         data = fetch_game(game)
-        # “latest” = cogemos el primero si la fuente está ordenada desc.
         if data:
+            # latest: escogemos el primero (las páginas suelen estar en orden descendente)
+            data.sort(key=lambda x: x.get("date",""), reverse=True)
             results.append(data[0])
 
     payload = build_payload(results)
