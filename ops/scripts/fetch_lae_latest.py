@@ -1,35 +1,12 @@
-# ops/scripts/fetch_lae_latest.py
-# Construye docs/api/lae_latest.json a partir de docs/api/lae_historico.json
-
-from __future__ import annotations
-import json
-from pathlib import Path
-from typing import Dict, Any, List
-
-from fetch_lae_common import today_utc, write_json, latest_by_game
-
-HIST = Path("docs/api/lae_historico.json")
-OUT  = Path("docs/api/lae_latest.json")
-OUT.parent.mkdir(parents=True, exist_ok=True)
-
-
-def load_hist() -> Dict[str, Any]:
-    if HIST.exists():
-        with open(HIST, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"generated_at": today_utc(), "results": [], "errors": ["no historic file"]}
-
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from fetch_lae_common import scrape_all, build_payload_latest, write_json, API_DIR
 
 def main():
-    hist = load_hist()
-    all_results: List[Dict[str, Any]] = hist.get("results", [])
-    payload = {
-        "generated_at": today_utc(),
-        "results": latest_by_game(all_results),
-        "errors": [],
-    }
-    write_json(str(OUT), payload)
-
+    data = scrape_all(max_pages=1)
+    payload = build_payload_latest(data)
+    write_json(API_DIR / "lae_latest.json", payload)
+    print("[done] latest listo")
 
 if __name__ == "__main__":
     main()
