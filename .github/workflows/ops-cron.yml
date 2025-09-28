@@ -3,7 +3,7 @@ name: build-and-publish
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 7 * * *"  # 07:15 UTC diario
+    - cron: "15 7 * * *"
 
 jobs:
   build-and-publish:
@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-            fetch-depth: 0
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,23 +25,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Debug tree
+      - name: Debug tree (ver rutas)
         run: |
-          echo "Rutas del repo:"
-          ls -la
-          echo "OPS/scripts:"
-          ls -la OPS/scripts || true
+          echo "=== Raíz ==="; ls -la
+          echo "=== find fetch_lae_historic.py ==="
+          find . -maxdepth 3 -type f -iname "fetch_lae_historic.py" -print || true
 
       - name: Make output dir
-        run: |
-          mkdir -p docs/api
+        run: mkdir -p docs/api
 
       - name: Build docs/api/lae_historico.json
+        env:
+          OUTFILE: docs/api/lae_historico.json
         run: |
-          echo "[build] Generando histórico real..."
-          python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          set -e
+          # Intenta localizar el script en OPS/ o ops/ (case-insensitive)
+          SCRIPT="$(find . -type f \( -path './OPS/scripts/fetch_lae_historic.py' -o -path './ops/scripts/fetch_lae_historic.py' \) | head -n1)"
+          if [ -z "$SCRIPT" ]; then
+            echo "ERROR: No encuentro fetch_lae_historic.py en OPS/scripts/ ni ops/scripts/"; exit 2
+          fi
+          echo "[build] Usando script: $SCRIPT"
+          python "$SCRIPT" "$OUTFILE"
 
-      # (Opcional) Mantener el latest de pruebas mientras fijamos fuente oficial
       - name: Build docs/api/lae_latest.json (mock estable)
         run: |
           cat > docs/api/lae_latest.json <<'JSON'
