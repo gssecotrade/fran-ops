@@ -75,14 +75,37 @@ jobs:
           JSON
 
       - name: Commit & Push both JSONs
+        env:
+          BRANCH: ${{ github.ref_name }}
         run: |
+          set -e
+
+          # Evitar avisos de seguridad en runners
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
-          git add docs/api/lae_historico.json docs/api/lae_latest.json
-          if git diff --cached --quiet; then
-            echo "Sin cambios que publicar."
-          else
+
+          # Asegura que estamos en la rama del workflow (main salvo que dispares otra)
+          git checkout "$BRANCH"
+
+          # Stage de los artefactos generados
+          git add docs/api/lae_historico.json docs/api/lae_latest.json || true
+
+          # Crea commit solo si hay cambios staged
+          if ! git diff --cached --quiet; then
             git commit -m "ops: publish lae_historico.json + lae_latest.json"
-            git push
+          else
+            echo "Sin cambios que publicar (working tree limpio)."
+          fi
+
+          # Rebase sobre la remota con autostash (protege nuestros cambios locales)
+          git fetch origin "$BRANCH"
+          git -c rebase.autoStash=true pull --rebase origin "$BRANCH" || true
+
+          # Push (si hay commits nuevos)
+          if ! git diff --quiet origin/"$BRANCH"...HEAD; then
+            git push origin HEAD:"$BRANCH"
+          else
+            echo "Nada que pushear; HEAD coincide con remoto."
           fi
