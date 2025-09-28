@@ -1,39 +1,53 @@
 name: ops-cron
-
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 5,17 * * *"  # 05:15 y 17:15 UTC
+    - cron: "12 6,12,18 * * *"
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps (Playwright + Chromium)
+      - name: Install deps
         run: |
-          python -m pip install --upgrade pip
-          pip install playwright
+          python -m pip install -U pip
+          python -m pip install -r ops/scripts/requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Build historic (real scrape)
-        run: |
-          python ops/scripts/fetch_lae_historic.py
+      - name: Build latest.json
+        run: python ops/scripts/fetch_lae_latest.py
 
-      - name: Build latest from historic
-        run: |
-          python ops/scripts/fetch_lae_latest.py
+      - name: Build historico.json
+        run: python ops/scripts/fetch_lae_historic.py
 
-      - name: Commit & Push JSONs
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "ops: update docs/api JSONs (real scrape)"
-          file_pattern: docs/api/*.json
+      - name: Validate JSONs (no commit si vacíos)
+        run: |
+          python - <<'PY'
+          import json,sys
+          ok=True
+          for f in ['docs/api/lae_latest.json','docs/api/lae_historico.json']:
+              with open(f,'r',encoding='utf-8') as fh:
+                  d=json.load(fh)
+              if not d.get('results'):
+                  print('EMPTY:', f); ok=False
+          sys.exit(0 if ok else 2)
+          PY
+
+      - name: Commit & Push (solo si válidos)
+        if: ${{ success() }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/api/lae_latest.json docs/api/lae_historico.json
+          git fetch origin main
+          git rebase origin/main || true
+          git commit -m "ops: update docs/api JSONs (real scrape)" || echo "Nada que commitear"
+          git push origin HEAD:main
