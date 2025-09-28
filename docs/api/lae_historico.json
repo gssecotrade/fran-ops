@@ -1,10 +1,5 @@
 {
-  "generated_at": "2025-09-28T09:46:26.957936Z",
+  "generated_at": "2025-09-28T11:23:23.339153Z",
   "results": [],
-  "errors": [
-    "BONOLOTO: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-bonoloto (page 1)",
-    "PRIMITIVA: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-primitiva (page 1)",
-    "GORDO: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-el-gordo-de-la-primitiva (page 1)",
-    "EURO: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-euromillones (page 1)"
-  ]
+  "errors": []
 }
