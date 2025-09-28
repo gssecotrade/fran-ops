@@ -3,7 +3,10 @@ name: build-and-publish
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 7 * * *"
+    - cron: "0 6 * * *"  # diario 06:00 UTC (ajústalo si quieres)
+
+permissions:
+  contents: write
 
 jobs:
   build-and-publish:
@@ -14,98 +17,53 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install deps (requests, bs4, lxml)
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Debug tree (ver rutas)
-        run: |
-          echo "=== Raíz ==="; ls -la
-          echo "=== find fetch_lae_historic.py ==="
-          find . -maxdepth 3 -type f -iname "fetch_lae_historic.py" -print || true
-
       - name: Make output dir
         run: mkdir -p docs/api
 
-      - name: Build docs/api/lae_historico.json
-        env:
-          OUTFILE: docs/api/lae_historico.json
+      - name: Debug tree (ver rutas)
         run: |
-          set -e
-          # Intenta localizar el script en OPS/ o ops/ (case-insensitive)
-          SCRIPT="$(find . -type f \( -path './OPS/scripts/fetch_lae_historic.py' -o -path './ops/scripts/fetch_lae_historic.py' \) | head -n1)"
-          if [ -z "$SCRIPT" ]; then
-            echo "ERROR: No encuentro fetch_lae_historic.py en OPS/scripts/ ni ops/scripts/"; exit 2
-          fi
-          echo "[build] Usando script: $SCRIPT"
-          python "$SCRIPT" "$OUTFILE"
+          ls -la
+          echo "---- ops/scripts ----"
+          ls -la ops/scripts || true
 
-      - name: Build docs/api/lae_latest.json (mock estable)
+      # HISTÓRICO REAL
+      - name: Build docs/api/lae_historico.json
         run: |
-          cat > docs/api/lae_latest.json <<'JSON'
-          {
-            "generated_at": "2025-09-28T08:02:53Z",
-            "results": [
-              {
-                "game": "PRIMITIVA",
-                "date": "2025-09-25",
-                "numbers": [1,27,2,3,8,4],
-                "complementario": 5,
-                "reintegro": 6,
-                "source": "test"
-              },
-              {
-                "game": "BONOLOTO",
-                "date": "2025-09-24",
-                "numbers": [2,5,12,19,23,31],
-                "complementario": 8,
-                "reintegro": 3,
-                "source": "test"
-              }
-            ],
-            "errors": []
-          }
-          JSON
+          echo "[build] Generando histórico real..."
+          python ops/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          echo "[build] head ----"
+          head -n 40 docs/api/lae_historico.json || true
+
+      # ÚLTIMO SORTEO REAL
+      - name: Build docs/api/lae_latest.json
+        run: |
+          echo "[build] Generando lae_latest.json ..."
+          python ops/scripts/fetch_lae_latest.py docs/api/lae_latest.json
+          echo "[build] head ----"
+          head -n 40 docs/api/lae_latest.json || true
 
       - name: Commit & Push both JSONs
         env:
-          BRANCH: ${{ github.ref_name }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
-          set -e
-
-          # Evitar avisos de seguridad en runners
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Asegura que estamos en la rama del workflow (main salvo que dispares otra)
-          git checkout "$BRANCH"
-
-          # Stage de los artefactos generados
-          git add docs/api/lae_historico.json docs/api/lae_latest.json || true
-
-          # Crea commit solo si hay cambios staged
-          if ! git diff --cached --quiet; then
-            git commit -m "ops: publish lae_historico.json + lae_latest.json"
-          else
-            echo "Sin cambios que publicar (working tree limpio)."
-          fi
-
-          # Rebase sobre la remota con autostash (protege nuestros cambios locales)
-          git fetch origin "$BRANCH"
-          git -c rebase.autoStash=true pull --rebase origin "$BRANCH" || true
-
-          # Push (si hay commits nuevos)
-          if ! git diff --quiet origin/"$BRANCH"...HEAD; then
-            git push origin HEAD:"$BRANCH"
-          else
-            echo "Nada que pushear; HEAD coincide con remoto."
-          fi
+          git status
+          git add -A
+          # Evita error de "unstaged changes" y conflictos por rebase
+          git commit -m "ops: update docs/api (historico, latest) [CI]" || echo "Nada que commitear"
+          # Push directo; si hay carreras, fuerza con lease
+          git push origin HEAD:main || git pull --no-rebase --no-edit && git push origin HEAD:main || git push --force-with-lease origin HEAD:main
