@@ -1,10 +1,10 @@
 {
-  "generated_at": "2025-09-28T08:03:12.263519Z",
+  "generated_at": "2025-09-28T09:45:25.034016Z",
   "results": [],
   "errors": [
-    "PRIMITIVA: RuntimeError: Fallo GET https://www.loteriasyapuestas.es/es/la-primitiva/sorteos: HTTP 403",
-    "BONOLOTO: RuntimeError: Fallo GET https://www.loteriasyapuestas.es/es/bonoloto/sorteos: HTTP 403",
-    "GORDO: RuntimeError: Fallo GET https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos: HTTP 403",
-    "EURO: RuntimeError: Fallo GET https://www.loteriasyapuestas.es/es/euromillones/sorteos: HTTP 403"
+    "BONOLOTO: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-bonoloto (page 1)",
+    "PRIMITIVA: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-primitiva (page 1)",
+    "GORDO: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-el-gordo-de-la-primitiva (page 1)",
+    "EURO: RuntimeError: No se pudo obtener HTML válido para https://www.lotoideas.com/historico-euromillones (page 1)"
   ]
 }
