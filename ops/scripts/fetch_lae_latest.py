@@ -1,38 +1,19 @@
-# ops/scripts/fetch_lae_latest.py
-import sys, json
-from fetch_lae_common import get_html, parse_lotoideas_table, iso_now, write_json
+# -*- coding: utf-8 -*-
+import os
+from fetch_lae_common import fetch_game, build_payload, safe_write_json
 
-# URLs corregidas (con '/' final)
-URLS = {
-    "PRIMITIVA": "https://www.lotoideas.com/historico-primitiva/",
-    "BONOLOTO":  "https://www.lotoideas.com/historico-bonoloto/",
-    "GORDO":     "https://www.lotoideas.com/historico-el-gordo-de-la-primitiva/",
-    "EURO":      "https://www.lotoideas.com/historico-euromillones/",
-}
+OUTFILE = os.environ.get("OUT_LATEST", "docs/api/lae_latest.json")
 
-def main(outfile):
+def main():
     results = []
-    errors = []
+    for game in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
+        data = fetch_game(game)
+        # “latest” = cogemos el primero si la fuente está ordenada desc.
+        if data:
+            results.append(data[0])
 
-    for key, url in URLS.items():
-        try:
-            html = get_html(url)
-            rows = parse_lotoideas_table(html, key)
-            if rows:
-                # el más reciente es la primera fila de la tabla
-                results.append(rows[0])
-            else:
-                errors.append(f"{key}: sin filas parseadas")
-        except Exception as e:
-            errors.append(f"{key}: {e}")
-
-    payload = {
-        "generated_at": iso_now(),
-        "results": results,
-        "errors": errors,
-    }
-    write_json(payload, outfile)
+    payload = build_payload(results)
+    safe_write_json(OUTFILE, payload)
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else "docs/api/lae_latest.json"
-    main(out)
+    main()
