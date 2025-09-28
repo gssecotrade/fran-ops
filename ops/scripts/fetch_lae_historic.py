@@ -1,125 +1,276 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# OPS/scripts/fetch_lae_historic.py
+# Fuente: https://www.lotoideas.com (páginas de "Histórico de Resultados")
+# Salida: docs/api/lae_historico.json con estructura:
+# {
+#   "generated_at": "...Z",
+#   "results": [ {game, date(dd/MM/yyyy), numbers[...], complementario?, reintegro?, estrellas?} ],
+#   "errors": [...]
+# }
 
-import sys, re, json, argparse, datetime as dt
+import sys, json, time, re
+from datetime import datetime
+from typing import List, Dict, Tuple, Optional
+
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "LAE-Bot/1.0 (+github actions; data for analysis)"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9"
+})
+
+# Rutas candidatas por juego en lotoideas (probadas)
+CANDIDATE_URLS: Dict[str, List[str]] = {
+    "BONOLOTO": [
+        "https://www.lotoideas.com/historico-de-resultados-bonoloto",
+        "https://www.lotoideas.com/historico-bonoloto",
+    ],
+    "PRIMITIVA": [
+        "https://www.lotoideas.com/historico-de-resultados-primitiva",
+        "https://www.lotoideas.com/historico-primitiva",
+    ],
+    "GORDO": [
+        "https://www.lotoideas.com/historico-de-resultados-el-gordo-de-la-primitiva",
+        "https://www.lotoideas.com/historico-el-gordo-de-la-primitiva",
+    ],
+    "EURO": [
+        "https://www.lotoideas.com/historico-de-resultados-euromillones",
+        "https://www.lotoideas.com/historico-euromillones",
+    ],
 }
-TIMEOUT = 30
 
-MIRRORS = {
-    "PRIMITIVA": "https://www.lotoideas.com/historico/resultados-primitiva.php",
-    "BONOLOTO":  "https://www.lotoideas.com/historico/resultados-bonoloto.php",
-    "GORDO":     "https://www.lotoideas.com/historico/resultados-el-gordo-primitiva.php",
-    "EURO":      "https://www.lotoideas.com/historico/resultados-euromillones.php",
-}
+DATE_RE = re.compile(r"(\d{2})/(\d{2})/(\d{4})")  # dd/mm/yyyy
+NUM_RE  = re.compile(r"^\d{1,2}$")
 
-DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
-
-def to_iso(date_str):
-    m = DATE_RE.search(date_str)
-    if not m: 
+def ddmmyyyy(s: str) -> Optional[str]:
+    s = s.strip()
+    m = DATE_RE.search(s)
+    if not m:
         return None
-    d, m_, y = map(int, m.groups())
-    try:
-        return dt.date(y, m_, d).isoformat()
-    except ValueError:
-        return None
+    d, mth, y = m.group(1), m.group(2), m.group(3)
+    return f"{d}/{mth}/{y}"
 
-def get(url, params=None):
-    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, params=params)
-    r.raise_for_status()
-    return r.text
-
-def parse_table(game, html):
-    soup = BeautifulSoup(html, "lxml")
-    t = soup.find("table")
-    if not t:
-        return []
-    rows = t.find_all("tr")
+def cell_numbers(cells: List[str]) -> List[int]:
     out = []
-    for tr in rows[1:]:
-        cols = [c.get_text(strip=True) for c in tr.find_all(["td","th"])]
-        if not cols: continue
-        iso = to_iso(cols[0])
-        if not iso: 
-            continue
-        nums = [int(x) for x in cols[1:7] if x.isdigit()]
-        draw = {"game": game, "date": iso, "numbers": nums[:6]}
-        if game in ("PRIMITIVA","BONOLOTO"):
-            if len(cols) >= 9 and cols[7].isdigit():
-                draw["complementario"] = int(cols[7])
-            if len(cols) >= 10 and cols[8].isdigit():
-                draw["reintegro"] = int(cols[8])
-        elif game == "GORDO":
-            if len(cols) >= 7 and cols[6].isdigit():
-                draw["clave"] = int(cols[6])
-        elif game == "EURO":
-            stars = [int(x) for x in cols[6:8] if x.isdigit()]
-            if len(stars) == 2:
-                draw["estrellas"] = stars
-        out.append(draw)
-    return out
-
-def dedup_and_sort(draws):
-    bykey = {}
-    for d in draws:
-        k = (d["game"], d["date"])
-        bykey[k] = d
-    out = list(bykey.values())
-    out.sort(key=lambda x: (x["game"], x["date"]))
-    return out
-
-def fetch_historic(pages):
-    """
-    Algunas webs paginan con ?pagina=2,3... Otras cargan todo en una sola tabla.
-    Este scraper mira primero si existe paginación simple (?page o ?p o ?pagina).
-    Si no existe, lee la página base completa.
-    """
-    results = []
-    for game, base in MIRRORS.items():
-        got_any = False
-        # 1) intenta paginación conocida
-        for param in ("page","pagina","p"):
+    for c in cells:
+        c2 = c.strip().replace("·", "").replace(".", "")
+        # Muchos sitios usan 01,02... -> int()
+        if NUM_RE.match(c2):
             try:
-                for i in range(1, pages+1):
-                    html = get(base, params={param: i})
-                    ds = parse_table(game, html)
-                    if not ds:
-                        break
-                    results.extend(ds)
-                    got_any = True
-            except Exception:
+                out.append(int(c2))
+            except:
                 pass
-            if got_any:
-                break
-        # 2) si no hubo paginación o falló, una pasada “flat”
-        if not got_any:
-            try:
-                html = get(base)
-                results.extend(parse_table(game, html))
-            except Exception as e:
-                print(f"[error] {game}: {e}")
-    return dedup_and_sort(results)
+    return out
 
-def main(outfile, pages):
-    res = fetch_historic(pages)
-    payload = {
-        "generated_at": dt.datetime.utcnow().isoformat() + "Z",
-        "results": res,
-        "errors": []
-    }
+def fetch_table_rows(url: str, page: int) -> Tuple[List[List[str]], bool]:
+    """
+    Lee una página (si soporta paginación con ?page=N o /page/N).
+    Retorna (filas_en_texto, hay_mas_paginas?)
+    """
+    # Probar variantes de paginación:
+    candidates = [url]
+    # ?page=N
+    if page > 1:
+        candidates.append(f"{url}?page={page}")
+        # /page/N
+        if not url.endswith("/"):
+            candidates.append(f"{url}/page/{page}")
+        else:
+            candidates.append(f"{url}page/{page}")
+
+    last_exc = None
+    html = None
+    for u in candidates:
+        try:
+            r = SESSION.get(u, timeout=30)
+            # algunos sitios devuelven 200 con sínonimos; quedarnos con primera 200
+            if r.status_code == 200 and ("<table" in r.text.lower()):
+                html = r.text
+                break
+        except Exception as e:
+            last_exc = e
+    if html is None:
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"No se pudo obtener HTML válido para {url} (page {page})")
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Buscar la tabla principal de resultados
+    # Heurística: la primera tabla con cabecera que tenga la palabra 'FECHA'
+    table = None
+    for t in soup.find_all("table"):
+        head = t.find("thead") or t.find("tr")
+        if not head:
+            continue
+        text = t.get_text(" ", strip=True).upper()
+        if "FECHA" in text and ("GANADORA" in text or "COMB." in text or "COMBINACIÓN" in text or "COMBINACION" in text):
+            table = t
+            break
+    if not table:
+        # fallback a primera tabla
+        ts = soup.find_all("table")
+        if ts:
+            table = ts[0]
+        else:
+            return ([], False)
+
+    rows = []
+    for tr in table.find_all("tr"):
+        cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+        # saltar cabeceras
+        if cols and cols[0].strip().upper() in ("FECHA", "FECHAS"):
+            continue
+        if cols:
+            rows.append(cols)
+
+    # heurística muy simple para "hay más páginas":
+    hay_mas = False
+    pager = soup.find(class_=re.compile("pagination|pager|paginacion", re.I)) or soup.find("nav", class_=re.compile("pagination", re.I))
+    if pager and ("next" in pager.get_text(" ", strip=True).lower() or "siguiente" in pager.get_text(" ", strip=True).lower()):
+        hay_mas = True
+
+    return (rows, hay_mas)
+
+def parse_row_for_game(game: str, cols: List[str]) -> Optional[Dict]:
+    """
+    Devuelve un draw normalizado o None.
+    Para evitar depender de posiciones exactas, detectamos:
+      - fecha en la primera o primeras columnas
+      - números: todos los enteros de la fila
+      - extras por juego: complementario/reintegro/estrellas/clave
+    """
+    if not cols:
+        return None
+
+    # Fecha (suele ir en la col 0)
+    date = None
+    for c in cols[:2]:
+        d = ddmmyyyy(c)
+        if d:
+            date = d
+            break
+    if not date:
+        return None
+
+    nums_all = cell_numbers(cols[1:])  # ignorar la fecha
+    if not nums_all:
+        return None
+
+    draw = {"game": game, "date": date}
+
+    # Reglas por juego
+    g = game.upper()
+    if g in ("PRIMITIVA", "BONOLOTO"):
+        # esperamos 6 + compl + reintegro
+        # tomar siempre los 6 primeros como números
+        if len(nums_all) < 6:
+            return None
+        draw["numbers"] = nums_all[:6]
+        # extras si existen
+        if len(nums_all) >= 7:
+            draw["complementario"] = nums_all[6]
+        # el reintegro suele venir como última cifra de la fila; si hay 8+ coger la última
+        if len(nums_all) >= 8:
+            draw["reintegro"] = nums_all[-1]
+
+    elif g == "EURO":
+        # 5 números + 2 estrellas
+        if len(nums_all) < 7:
+            return None
+        draw["numbers"] = nums_all[:5]
+        draw["estrellas"] = nums_all[5:7]
+
+    elif g == "GORDO":
+        # 5 números + clave (1)
+        if len(nums_all) < 6:
+            return None
+        draw["numbers"] = nums_all[:5]
+        draw["clave"] = nums_all[5]
+
+    else:
+        # default genérico: al menos 5
+        if len(nums_all) < 5:
+            return None
+        draw["numbers"] = nums_all[:6]
+
+    return draw
+
+def scrape_game(game: str, urls: List[str], limit_pages: int = 120) -> Tuple[List[Dict], Optional[str]]:
+    """
+    Intenta múltiples urls candidatas.
+    Pagina hasta que no haya más filas o llegue a limit_pages.
+    """
+    for base in urls:
+        results = []
+        last_rows = -1
+        error = None
+        for page in range(1, limit_pages + 1):
+            try:
+                rows, more = fetch_table_rows(base, page)
+                if not rows:
+                    if page == 1:
+                        error = f"Sin filas en {base}"
+                    break
+                for r in rows:
+                    draw = parse_row_for_game(game, r)
+                    if draw:
+                        results.append(draw)
+
+                # corte si no crece
+                if len(results) == last_rows:
+                    break
+                last_rows = len(results)
+
+                if not more:
+                    break
+
+                # pequeño respiro
+                time.sleep(0.3)
+
+            except Exception as e:
+                error = f"{type(e).__name__}: {e}"
+                break
+
+        if results:
+            return (results, None)
+        # si esta base falló, probar la siguiente
+    return ([], error or "No se pudo obtener datos")
+
+def main(outfile: str):
+    payload = {"generated_at": datetime.utcnow().isoformat() + "Z", "results": [], "errors": []}
+
+    for game, urls in CANDIDATE_URLS.items():
+        print(f"[fetch] {game}")
+        results, err = scrape_game(game, urls)
+        if err:
+            print(f"[warn] {game}: {err}")
+            payload["errors"].append(f"{game}: {err}")
+        else:
+            print(f"[ok] {game}: {len(results)} sorteos")
+            payload["results"].extend(results)
+
+    # Ordenar por fecha (asc) por consistencia (dd/MM/yyyy -> yyyymmdd)
+    def key_date(d: Dict) -> str:
+        try:
+            dd, mm, yy = d["date"].split("/")
+            return f"{yy}{mm}{dd}"
+        except Exception:
+            return d["date"]
+    payload["results"].sort(key=key_date)
+
     with open(outfile, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"[done] historic -> {outfile} ({len(res)} draws)")
+
+    print(f"[done] Escrito {len(payload['results'])} sorteos en {outfile}")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("outfile", nargs="?", default="docs/api/lae_historico.json")
-    ap.add_argument("--pages", type=int, default=12,
-                    help="páginas a recorrer si hay paginación (por juego)")
-    args = ap.parse_args()
-    main(args.outfile, args.pages)
+    outfile = sys.argv[1] if len(sys.argv) > 1 else "docs/api/lae_historico.json"
+    main(outfile)
