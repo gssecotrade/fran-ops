@@ -3,14 +3,24 @@ name: build-and-publish
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"  # diario 06:00 UTC (ajústalo si quieres)
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write
 
+# ❗ Concurrencia: cancela cualquier run anterior en marcha
+concurrency:
+  group: build-and-publish
+  cancel-in-progress: true
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 25   # límite global del job
+
+    env:
+      # Para pruebas rápidas: limita páginas. Luego súbelo a 50.
+      LAE_MAX_PAGES: "5"
 
     steps:
       - name: Checkout repo
@@ -32,27 +42,27 @@ jobs:
       - name: Make output dir
         run: mkdir -p docs/api
 
-      - name: Debug tree (ver rutas)
+      - name: Debug tree
         run: |
           ls -la
           echo "---- ops/scripts ----"
           ls -la ops/scripts || true
 
-      # HISTÓRICO REAL
       - name: Build docs/api/lae_historico.json
+        timeout-minutes: 10
         run: |
           echo "[build] Generando histórico real..."
-          python ops/scripts/fetch_lae_historic.py docs/api/lae_historico.json
-          echo "[build] head ----"
-          head -n 40 docs/api/lae_historico.json || true
+          python -u ops/scripts/fetch_lae_historic.py docs/api/lae_historico.json
+          echo "[head] ----"
+          head -n 60 docs/api/lae_historico.json || true
 
-      # ÚLTIMO SORTEO REAL
       - name: Build docs/api/lae_latest.json
+        timeout-minutes: 6
         run: |
           echo "[build] Generando lae_latest.json ..."
-          python ops/scripts/fetch_lae_latest.py docs/api/lae_latest.json
-          echo "[build] head ----"
-          head -n 40 docs/api/lae_latest.json || true
+          python -u ops/scripts/fetch_lae_latest.py docs/api/lae_latest.json
+          echo "[head] ----"
+          head -n 60 docs/api/lae_latest.json || true
 
       - name: Commit & Push both JSONs
         env:
@@ -61,9 +71,9 @@ jobs:
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
+          set -e
           git status
           git add -A
-          # Evita error de "unstaged changes" y conflictos por rebase
           git commit -m "ops: update docs/api (historico, latest) [CI]" || echo "Nada que commitear"
-          # Push directo; si hay carreras, fuerza con lease
-          git push origin HEAD:main || git pull --no-rebase --no-edit && git push origin HEAD:main || git push --force-with-lease origin HEAD:main
+          # evita bloqueos por rebase; si falla, trae y vuelve a intentar
+          git push origin HEAD:main || (git pull --no-rebase --no-edit && git push origin HEAD:main) || git push --force-with-lease origin HEAD:main
