@@ -1,5 +1,5 @@
 {
-  "generated_at": "2025-09-28T16:41:32.807147Z",
+  "generated_at": "2025-09-28T17:27:36.752017Z",
   "results": [],
   "errors": [
     "PRIMITIVA page 1: Page.wait_for_selector: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"table\") to be visible\n",
