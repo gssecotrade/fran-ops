@@ -1,173 +1,168 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Genera docs/api/lae_latest.json con guard-rails:
-- Estructura: { generated_at, results: [...], errors: [...] }
-- NO publica sorteos sin fecha (items con "date" vacío o nulo se descartan)
-- Si no hay ningún sorteo válido, publica results=[] y deja constancia en errors
-- Preparado para ampliarse con scrapers reales; por ahora intenta obtener una
-  fuente JSON ya existente (si existe) para mantener compatibilidad.
+import sys, re, json, time, datetime as dt
+import requests
+from bs4 import BeautifulSoup
 
-Salida: docs/api/lae_latest.json
-"""
+HEADERS = {
+    "User-Agent": "LAE-Bot/1.0 (+github actions; data for analysis)"
+}
+TIMEOUT = 30
 
-from __future__ import annotations
-import os
-import sys
-import json
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+# Fuentes oficiales (HTML) – se intenta primero:
+OFFICIAL = {
+    "PRIMITIVA": "https://www.loteriasyapuestas.es/es/la-primitiva/sorteos",
+    "BONOLOTO":  "https://www.loteriasyapuestas.es/es/bonoloto/sorteos",
+    "GORDO":     "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos",
+    "EURO":      "https://www.loteriasyapuestas.es/es/euromillones/sorteos",
+}
 
-try:
-    import requests
-except Exception:
-    print("Installing dependencies (requests)...", flush=True)
-    os.system(f"{sys.executable} -m pip install --upgrade pip >/dev/null 2>&1")
-    os.system(f"{sys.executable} -m pip install requests >/dev/null 2>&1")
-    import requests  # type: ignore
+# Fuentes espejo (tablas públicas muy limpias) – fallback:
+MIRRORS = {
+    "PRIMITIVA": "https://www.lotoideas.com/historico/resultados-primitiva.php",
+    "BONOLOTO":  "https://www.lotoideas.com/historico/resultados-bonoloto.php",
+    "GORDO":     "https://www.lotoideas.com/historico/resultados-el-gordo-primitiva.php",
+    "EURO":      "https://www.lotoideas.com/historico/resultados-euromillones.php",
+}
 
+DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
 
-# -------------------------
-# Config
-# -------------------------
-
-OUT_PATH = "docs/api/lae_latest.json"
-
-# Fuentes candidatas (se pueden añadir más)
-CANDIDATE_SOURCES = [
-    # 1) variable de entorno para pruebas/manual
-    os.getenv("LAE_SOURCE_JSON") or "",
-    # 2) rama principal del propio repo (si existiera un JSON previo)
-    "https://raw.githubusercontent.com/gssecotrade/fran-ops/main/docs/api/lae_latest.json",
-    # 3) GitHub Pages del repo (si está publicado)
-    "https://gssecotrade.github.io/fran-ops/docs/api/lae_latest.json",
-]
-
-
-# -------------------------
-# Utilidades
-# -------------------------
-
-def utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def http_get_json(url: str, timeout: int = 20) -> Optional[Dict[str, Any]]:
-    if not url:
+def to_iso(date_str):
+    """Convierte dd/mm/yyyy o dd-mm-yyyy -> ISO yyyy-mm-dd."""
+    m = DATE_RE.search(date_str)
+    if not m: 
         return None
+    d, m_, y = map(int, m.groups())
     try:
-        r = requests.get(url, timeout=timeout, headers={"User-Agent": "fran-ops/gha"})
-        if r.status_code >= 200 and r.status_code < 300:
-            return r.json()
-        return None
-    except Exception:
+        return dt.date(y, m_, d).isoformat()
+    except ValueError:
         return None
 
+def get(url):
+    r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    r.raise_for_status()
+    return r.text
 
-def ensure_dir(path: str) -> None:
-    d = os.path.dirname(os.path.abspath(path))
-    if not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
+def parse_official_latest(game, html):
+    """
+    Heurística: en las páginas oficiales suele aparecer un bloque de
+    'último sorteo' con bolas <li>, o tablas. Extraemos 1..3 más recientes.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    draws = []
 
+    # 1) busca bloques que contengan 6 bolas (N1..N6) + complementario/reintegro/estrellas
+    #    (los selectores varían a menudo; mantenemos heurística flexible)
+    for block in soup.find_all(True):
+        balls = [int(x.get_text(strip=True)) for x in block.find_all('li')
+                 if x.get_text(strip=True).isdigit()]
+        if len(balls) >= 5:
+            # busca fecha en el mismo bloque (o padres)
+            text = " ".join(block.get_text(" ", strip=True).split())
+            iso = to_iso(text)
+            if iso:
+                draw = {"game": game, "date": iso, "numbers": balls[:6]}
+                # complementario/reintegro/estrellas (heurístico)
+                if "reintegro" in text.lower():
+                    # saca reintegro si solo hay 1 dígito aislado
+                    rein = re.findall(r"reintegro[^0-9]*(\d{1,2})", text.lower())
+                    if rein: draw["reintegro"] = int(rein[0])
+                if "complementario" in text.lower():
+                    comp = re.findall(r"complementario[^0-9]*(\d{1,2})", text.lower())
+                    if comp: draw["complementario"] = int(comp[0])
+                if "estrella" in text.lower():
+                    estrella = re.findall(r"estrella[^0-9]*(\d{1,2})", text.lower())
+                    if len(estrella) >= 2:
+                        draw["estrellas"] = [int(estrella[0]), int(estrella[1])]
+                draws.append(draw)
+                if len(draws) >= 3:
+                    break
 
-def canonical_game_key(raw: Any) -> str:
-    if not raw:
-        return ""
-    s = str(raw).strip().lower()
-    if "primitiva" in s:
-        return "PRIMITIVA"
-    if "bonoloto" in s:
-        return "BONOLOTO"
-    if "gordo" in s:
-        return "GORDO"
-    if "euromillon" in s or ("euro" in s and "millon" in s):
-        return "EURO"
-    if raw in ("PRIMITIVA", "BONOLOTO", "GORDO", "EURO"):
-        return str(raw)
-    return ""
+    return dedup_and_sort(draws)
 
-
-def results_from_any(json_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extrae un array de sorteos desde varias formas posibles."""
-    if not isinstance(json_obj, dict):
+def parse_mirror_latest(game, html):
+    """De tablas espejo (lotoideas). Tomamos 1..3 filas más recientes."""
+    soup = BeautifulSoup(html, "lxml")
+    t = soup.find("table")
+    if not t:
         return []
-
-    r = json_obj.get("results")
-    if isinstance(r, list):
-        return [x for x in r if isinstance(x, dict)]
-
-    if isinstance(r, dict):
-        out: List[Dict[str, Any]] = []
-        for k, v in r.items():
-            key = canonical_game_key(k)
-            if isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict):
-                        item.setdefault("game", key or item.get("game"))
-                        out.append(item)
-            elif isinstance(v, dict):
-                v.setdefault("game", key or v.get("game"))
-                out.append(v)
-        return out
-
-    return []
-
-
-# -------------------------
-# Generación del payload
-# -------------------------
-
-def build_payload() -> Dict[str, Any]:
-    errors: List[str] = []
-    raw_items: List[Dict[str, Any]] = []
-
-    # 1) Intentar fuentes candidatas (si alguna tuviera datos)
-    for url in CANDIDATE_SOURCES:
-        if not url:
+    rows = t.find_all("tr")
+    out = []
+    for tr in rows[1:5]:  # 4 filas bastan para cubrir 1..3 últimas
+        cols = [c.get_text(strip=True) for c in tr.find_all(["td","th"])]
+        if not cols: 
             continue
-        js = http_get_json(url)
-        if not js:
+        # suele ser: FECHA, 6 números, comp, reintegro/clave/etc
+        iso = to_iso(cols[0])
+        if not iso: 
             continue
-        raw_items = results_from_any(js)
-        if raw_items:
+        nums = [int(x) for x in cols[1:7] if x.isdigit()]
+        draw = {"game": game, "date": iso, "numbers": nums[:6]}
+        # complementario / reintegro / estrellas / clave según juego:
+        if game in ("PRIMITIVA","BONOLOTO"):
+            if len(cols) >= 9 and cols[7].isdigit():
+                draw["complementario"] = int(cols[7])
+            if len(cols) >= 10 and cols[8].isdigit():
+                draw["reintegro"] = int(cols[8])
+        elif game == "GORDO":
+            # 5 números + clave
+            if len(cols) >= 7 and cols[6].isdigit():
+                draw["clave"] = int(cols[6])
+        elif game == "EURO":
+            # 5 números + 2 estrellas
+            stars = [int(x) for x in cols[6:8] if x.isdigit()]
+            if len(stars) == 2:
+                draw["estrellas"] = stars
+        out.append(draw)
+        if len(out) >= 3:
             break
+    return dedup_and_sort(out)
 
-    # 2) Guard-rail: filtrar items SIN fecha
-    valid: List[Dict[str, Any]] = []
-    for it in raw_items:
-        date_val = it.get("date") or it.get("fecha") or it.get("draw_date")
-        if date_val and str(date_val).strip() != "":
-            valid.append(it)
-        else:
-            g = canonical_game_key(it.get("game"))
-            errors.append(f"{g or 'UNKNOWN'}: no_date")
+def dedup_and_sort(draws):
+    bykey = {}
+    for d in draws:
+        if not d.get("date"): 
+            continue
+        k = (d["game"], d["date"])
+        if k not in bykey:
+            bykey[k] = d
+    out = list(bykey.values())
+    out.sort(key=lambda x: (x["game"], x["date"]), reverse=True)
+    return out
 
-    # 3) Construir payload final
+def fetch_latest():
+    results = []
+    for g, url in OFFICIAL.items():
+        try:
+            html = get(url)
+            ds = parse_official_latest(g, html)
+            if not ds:
+                # fallback espejo
+                html = get(MIRRORS[g])
+                ds = parse_mirror_latest(g, html)
+            results.extend(ds)
+        except Exception as e:
+            print(f"[error] {g}: {e}")
+            # intenta al menos espejo si falló oficial
+            try:
+                html = get(MIRRORS[g])
+                results.extend(parse_mirror_latest(g, html))
+            except Exception as e2:
+                print(f"[error] {g} (mirror): {e2}")
+    return dedup_and_sort(results)
+
+def main(outfile):
+    res = fetch_latest()
     payload = {
-        "generated_at": utc_now_iso(),
-        "results": valid,
-        "errors": errors,
+        "generated_at": dt.datetime.utcnow().isoformat() + "Z",
+        "results": res,
+        "errors": []
     }
-    return payload
-
-
-def main() -> int:
-    payload = build_payload()
-    ensure_dir(OUT_PATH)
-
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
+    with open(outfile, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-
-    # Mensaje humano
-    total = len(payload.get("results", []))
-    print(f"[build] Escrito {OUT_PATH} con {total} sorteos válidos.")
-    if payload.get("errors"):
-        print("[build] Errores:", *payload["errors"], sep="\n  - ")
-
-    return 0
-
+    print(f"[done] latest -> {outfile} ({len(res)} draws)")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    out = sys.argv[1] if len(sys.argv) > 1 else "docs/api/lae_latest.json"
+    main(out)
