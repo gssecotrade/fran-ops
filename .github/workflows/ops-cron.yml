@@ -1,97 +1,69 @@
-name: ops-cron
+name: Build & publish LAE JSONs
 
 on:
   workflow_dispatch:
-    inputs:
-      build:
-        description: Qué quieres construir
-        type: choice
-        options: [both, latest, historic]
-        default: both
   schedule:
-    - cron: '5 5 * * *'   # opcional
+    # cada hora a :07 por si hay nuevos sorteos
+    - cron: "7 * * * *"
 
 permissions:
   contents: write
-
-concurrency:
-  group: ops-cron
-  cancel-in-progress: false
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout (full)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Mostrar árbol (debug)
-        run: |
-          pwd
-          echo "--- nivel 1 ---"
-          ls -la
-          echo "--- OPS ---"; ls -la OPS || true
-          echo "--- ops ---"; ls -la ops || true
-          echo "--- OPS/scripts ---"; ls -la OPS/scripts || true
-          echo "--- ops/scripts ---"; ls -la ops/scripts || true
-
-      # Detectamos automáticamente la carpeta de scripts (OPS vs ops)
-      - name: Detectar carpeta de scripts
-        id: detect
-        shell: bash
-        run: |
-          set -e
-          for base in OPS ops; do
-            if [ -f "$base/scripts/fetch_lae_latest.py" ] && [ -f "$base/scripts/fetch_lae_historic.py" ]; then
-              echo "SCRIPTS_DIR=$base/scripts" >> $GITHUB_ENV
-              echo "scripts_dir=$base/scripts" >> $GITHUB_OUTPUT
-              echo "Usando $base/scripts"
-              exit 0
-            fi
-          done
-          echo "No encuentro los scripts en OPS/scripts ni en ops/scripts"
-          exit 1
-
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Instalar deps (requests, bs4, lxml)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests bs4 lxml
+          pip install requests beautifulsoup4 lxml
 
-      - name: Crear carpeta de salida
+      - name: Make output dir
         run: mkdir -p docs/api
 
-      # ===== latest =====
+      # ====== Latest (1–3 últimos sorteos por juego) ======
       - name: Build docs/api/lae_latest.json
-        if: ${{ github.event.inputs.build == '' || github.event.inputs.build == 'both' || github.event.inputs.build == 'latest' }}
         run: |
-          echo "[build] Generando lae_latest.json ..."
-          python "$SCRIPTS_DIR/fetch_lae_latest.py" "docs/api/lae_latest.json"
-          echo "---- head ----"; head -n 40 docs/api/lae_latest.json || true
-          echo "---- size ----"; wc -c docs/api/lae_latest.json || true
+          python OPS/scripts/fetch_lae_latest.py docs/api/lae_latest.json
+          python - << 'PY'
+          import json,sys
+          p='docs/api/lae_latest.json'
+          j=json.load(open(p,encoding='utf-8'))
+          if not isinstance(j,dict) or 'results' not in j:
+              raise SystemExit("latest.json inválido (sin 'results')")
+          print(f"[check] latest OK: {len(j['results'])} draws")
+          PY
 
-      # ===== historic =====
+      # ====== Histórico (paginas parseadas; ver flags en el script) ======
       - name: Build docs/api/lae_historico.json
-        if: ${{ github.event.inputs.build == '' || github.event.inputs.build == 'both' || github.event.inputs.build == 'historic' }}
         run: |
-          echo "[build] Generando lae_historico.json ..."
-          python "$SCRIPTS_DIR/fetch_lae_historic.py" "docs/api/lae_historico.json"
-          echo "---- head ----"; head -n 40 docs/api/lae_historico.json || true
-          echo "---- size ----"; wc -c docs/api/lae_historico.json || true
+          # Por defecto, recorre varias páginas por juego (ver flags en el script)
+          python OPS/scripts/fetch_lae_historic.py --pages 12 docs/api/lae_historico.json
+          python - << 'PY'
+          import json,sys
+          p='docs/api/lae_historico.json'
+          j=json.load(open(p,encoding='utf-8'))
+          if not isinstance(j,dict) or 'results' not in j:
+              raise SystemExit("historico.json inválido (sin 'results')")
+          print(f"[check] historic OK: {len(j['results'])} draws")
+          PY
 
-      - name: Commit & Push JSONs
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "ops: update docs/api JSONs"
-          file_pattern: docs/api/*.json
-          commit_user_name: github-actions[bot]
-          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
-          pull_strategy: FETCH_FIRST
-          push_options: '--force-with-lease'
+      - name: Commit & push (rebase safe)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git add docs/api/lae_latest.json docs/api/lae_historico.json
+          git commit -m "ops: update LAE JSONs (latest & historic)" || echo "No changes"
+          git push
