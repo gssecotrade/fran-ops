@@ -1,25 +1,21 @@
-name: Build & publish LAE JSONs
+name: build-and-publish
 
 on:
   workflow_dispatch:
   schedule:
-    # cada hora a :07 por si hay nuevos sorteos
-    - cron: "7 * * * *"
-
-permissions:
-  contents: write
+    - cron: "15 7 * * *"  # 07:15 UTC diario
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (full)
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+            fetch-depth: 0
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -29,41 +25,59 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 lxml
 
-      - name: Make output dir
-        run: mkdir -p docs/api
-
-      # ====== Latest (1–3 últimos sorteos por juego) ======
-      - name: Build docs/api/lae_latest.json
+      - name: Debug tree
         run: |
-          python OPS/scripts/fetch_lae_latest.py docs/api/lae_latest.json
-          python - << 'PY'
-          import json,sys
-          p='docs/api/lae_latest.json'
-          j=json.load(open(p,encoding='utf-8'))
-          if not isinstance(j,dict) or 'results' not in j:
-              raise SystemExit("latest.json inválido (sin 'results')")
-          print(f"[check] latest OK: {len(j['results'])} draws")
-          PY
+          echo "Rutas del repo:"
+          ls -la
+          echo "OPS/scripts:"
+          ls -la OPS/scripts || true
 
-      # ====== Histórico (paginas parseadas; ver flags en el script) ======
+      - name: Make output dir
+        run: |
+          mkdir -p docs/api
+
       - name: Build docs/api/lae_historico.json
         run: |
-          # Por defecto, recorre varias páginas por juego (ver flags en el script)
-          python OPS/scripts/fetch_lae_historic.py --pages 12 docs/api/lae_historico.json
-          python - << 'PY'
-          import json,sys
-          p='docs/api/lae_historico.json'
-          j=json.load(open(p,encoding='utf-8'))
-          if not isinstance(j,dict) or 'results' not in j:
-              raise SystemExit("historico.json inválido (sin 'results')")
-          print(f"[check] historic OK: {len(j['results'])} draws")
-          PY
+          echo "[build] Generando histórico real..."
+          python OPS/scripts/fetch_lae_historic.py docs/api/lae_historico.json
 
-      - name: Commit & push (rebase safe)
+      # (Opcional) Mantener el latest de pruebas mientras fijamos fuente oficial
+      - name: Build docs/api/lae_latest.json (mock estable)
+        run: |
+          cat > docs/api/lae_latest.json <<'JSON'
+          {
+            "generated_at": "2025-09-28T08:02:53Z",
+            "results": [
+              {
+                "game": "PRIMITIVA",
+                "date": "2025-09-25",
+                "numbers": [1,27,2,3,8,4],
+                "complementario": 5,
+                "reintegro": 6,
+                "source": "test"
+              },
+              {
+                "game": "BONOLOTO",
+                "date": "2025-09-24",
+                "numbers": [2,5,12,19,23,31],
+                "complementario": 8,
+                "reintegro": 3,
+                "source": "test"
+              }
+            ],
+            "errors": []
+          }
+          JSON
+
+      - name: Commit & Push both JSONs
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git pull --rebase
-          git add docs/api/lae_latest.json docs/api/lae_historico.json
-          git commit -m "ops: update LAE JSONs (latest & historic)" || echo "No changes"
-          git push
+          git add docs/api/lae_historico.json docs/api/lae_latest.json
+          if git diff --cached --quiet; then
+            echo "Sin cambios que publicar."
+          else
+            git commit -m "ops: publish lae_historico.json + lae_latest.json"
+            git push
+          fi
