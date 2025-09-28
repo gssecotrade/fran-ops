@@ -1,10 +1,5 @@
 {
-  "generated_at": "2025-09-28T11:45:27.597942Z",
+  "generated_at": "2025-09-28T16:43:35.885032Z",
   "results": [],
-  "errors": [
-    "PRIMITIVA: Falló GET https://www.lotoideas.com/historico-primitiva/: HTTP 404",
-    "BONOLOTO: Falló GET https://www.lotoideas.com/historico-bonoloto/: HTTP 404",
-    "GORDO: Falló GET https://www.lotoideas.com/historico-el-gordo-de-la-primitiva/: HTTP 404",
-    "EURO: Falló GET https://www.lotoideas.com/historico-euromillones/: HTTP 404"
-  ]
+  "errors": []
 }
