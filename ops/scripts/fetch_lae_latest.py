@@ -1,51 +1,38 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# ops/scripts/fetch_lae_latest.py
+import sys, json
+from fetch_lae_common import get_html, parse_lotoideas_table, iso_now, write_json
 
-import os
-import sys
-from datetime import datetime
-
-# Asegura import local
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if THIS_DIR not in sys.path:
-    sys.path.insert(0, THIS_DIR)
-
-from fetch_lae_common import _session, _get_html, scrape_lotoideas_table, write_json
-
-SOURCES = {
-    "PRIMITIVA": "https://www.lotoideas.com/historico-primitiva",
-    "BONOLOTO":  "https://www.lotoideas.com/historico-bonoloto",
-    "GORDO":     "https://www.lotoideas.com/historico-el-gordo-de-la-primitiva",
-    "EURO":      "https://www.lotoideas.com/historico-euromillones",
+# URLs corregidas (con '/' final)
+URLS = {
+    "PRIMITIVA": "https://www.lotoideas.com/historico-primitiva/",
+    "BONOLOTO":  "https://www.lotoideas.com/historico-bonoloto/",
+    "GORDO":     "https://www.lotoideas.com/historico-el-gordo-de-la-primitiva/",
+    "EURO":      "https://www.lotoideas.com/historico-euromillones/",
 }
 
-def main(outfile: str):
-    s = _session()
+def main(outfile):
     results = []
     errors = []
 
-    for game, url in SOURCES.items():
+    for key, url in URLS.items():
         try:
-            html = _get_html(s, url)
-            rows = scrape_lotoideas_table(html, game)
+            html = get_html(url)
+            rows = parse_lotoideas_table(html, key)
             if rows:
-                results.append(rows[0])  # la más reciente suele ser la primera
-                print(f"[ok] {game}: último={rows[0].get('date')}")
+                # el más reciente es la primera fila de la tabla
+                results.append(rows[0])
             else:
-                errors.append(f"{game}: sin filas")
+                errors.append(f"{key}: sin filas parseadas")
         except Exception as e:
-            errors.append(f"{game}: {e}")
+            errors.append(f"{key}: {e}")
 
     payload = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": iso_now(),
         "results": results,
         "errors": errors,
     }
-    write_json(outfile, payload)
-    print(f"[done] latest -> {outfile} | juegos_ok={len(results)} | errores={len(errors)}")
-
+    write_json(payload, outfile)
 
 if __name__ == "__main__":
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join("docs", "api", "lae_latest.json")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    out = sys.argv[1] if len(sys.argv) > 1 else "docs/api/lae_latest.json"
     main(out)
