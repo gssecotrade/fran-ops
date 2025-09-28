@@ -1,194 +1,86 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import os
-import re
-import json
-import time
-import random
+# ops/scripts/fetch_lae_common.py
+import time, json, re
 from datetime import datetime
-from typing import List, Dict, Any
-
 import requests
 from bs4 import BeautifulSoup
 
-# ======== HTTP helpers ========
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/124.0.0.0 Safari/537.36")
 
-def _session() -> requests.Session:
-    s = requests.Session()
-    # Cabeceras para evitar 403 y parecer navegador real
-    s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Connection": "keep-alive",
-    })
-    return s
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": UA,
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+})
 
-
-def _get_html(s: requests.Session, url: str, tries: int = 4, backoff: float = 0.7) -> str:
+def get_html(url, tries=4, backoff=0.8):
     last = None
     for i in range(tries):
         try:
-            r = s.get(url, timeout=30)
-            if r.status_code >= 500:
-                raise RuntimeError(f"HTTP {r.status_code}")
-            if r.status_code == 403:
-                # pequeño backoff aleatorio y reintento
-                time.sleep(backoff * (i + 1) + random.random())
-                last = f"HTTP 403 ({url})"
-                continue
-            r.raise_for_status()
-            return r.text
+            r = SESSION.get(url, timeout=30)
+            if r.status_code == 200 and r.text.strip():
+                return r.text
+            last = f"HTTP {r.status_code}"
         except Exception as e:
             last = str(e)
-            time.sleep(backoff * (i + 1))
+        time.sleep(backoff*(i+1))
     raise RuntimeError(f"Falló GET {url}: {last}")
 
-
-# ======== Parsing helpers ========
-
-DATE_RE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")
-
-def _parse_date(cell_text: str) -> str:
+def parse_lotoideas_table(html, game_key):
     """
-    Convierte texto tipo '26/09/2025' o '26-09-25' a 'YYYY-MM-DD'.
-    Devuelve '' si no reconoce fecha.
+    Lotoideas pinta una tabla con cabeceras:
+      FECHA | COMB. GANADORA (6 columnas) | COMP. | R.
+    Devolvemos una lista de dicts uniformes con:
+      date (yyyy-mm-dd), numbers[6], complementario, reintegro
     """
-    m = DATE_RE.search(cell_text.strip())
-    if not m:
-        return ""
-    d, mth, y = m.groups()
-    d = int(d); mth = int(mth); y = int(y)
-    if y < 100:  # normaliza '25' -> 2025 (asumimos siglo XXI para históricos recientes)
-        y += 2000
-    try:
-        return datetime(y, mth, d).strftime("%Y-%m-%d")
-    except Exception:
-        return ""
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if not table:
+        raise RuntimeError("No se pudo obtener HTML válido (sin <table>)")
 
-
-def _to_ints(vs: List[str]) -> List[int]:
     out = []
-    for v in vs:
-        v = v.strip()
-        if not v:
-            continue
-        v = v.replace(".", "").replace(",", "")
-        if v.isdigit():
-            out.append(int(v))
-    return out
-
-
-def _normalize_row(game: str, tds: List[str]) -> Dict[str, Any]:
-    """
-    Normaliza una fila en formato común:
-      {game, date, numbers[...], complementario?, reintegro?/estrellas?/clave?}
-    Asumimos tabla con:
-      PRIMITIVA/BONOLOTO: FECHA, 6 números, COMPLEMENTARIO, REINTEGRO
-      EL GORDO: FECHA, 5 números, CLAVE
-      EUROMILLONES: FECHA, 5 números, 2 ESTRELLAS
-    """
-    row = [x.strip() for x in tds]
-    if not row or len(row[0]) < 4:
-        return {}
-
-    date_iso = _parse_date(row[0])
-    if not date_iso:
-        return {}
-
-    # Extrae números crudos (celdas que tengan 1-2 dígitos)
-    nums_raw = []
-    extras_raw = []
-    for cell in row[1:]:
-        # separa por espacios si vienen "01 08 13 ..."
-        parts = re.split(r"\s+", cell.strip())
-        parts = [p for p in parts if p]
-        ints = _to_ints(parts)
-        # heurística simple: primeras 6/5 entradas son números, resto extras
-        if len(nums_raw) < 6:
-            nums_raw.extend(ints)
-        else:
-            extras_raw.extend(ints)
-
-    # Ajustes por juego
-    out = {"game": game, "date": date_iso}
-
-    if game in ("PRIMITIVA", "BONOLOTO"):
-        # 6 números + complementario + reintegro
-        numbers = nums_raw[:6]
-        out["numbers"] = numbers
-        # intenta deducir complementario y reintegro
-        comp, rein = "", ""
-        if len(extras_raw) >= 1:
-            comp = extras_raw[0]
-        if len(extras_raw) >= 2:
-            rein = extras_raw[1]
-        out["complementario"] = comp if comp != "" else ""
-        out["reintegro"] = rein if rein != "" else ""
-
-    elif game == "GORDO":
-        # 5 números + clave
-        numbers = nums_raw[:5]
-        out["numbers"] = numbers
-        clave = extras_raw[0] if extras_raw else ""
-        out["clave"] = clave
-
-    elif game == "EURO":
-        # 5 números + 2 estrellas
-        numbers = nums_raw[:5]
-        out["numbers"] = numbers
-        estrellas = extras_raw[:2] if len(extras_raw) >= 2 else []
-        out["estrellas"] = estrellas
-
-    else:
-        out["numbers"] = nums_raw[:6]
-
-    return out
-
-
-def scrape_lotoideas_table(html: str, game: str) -> List[Dict[str, Any]]:
-    """
-    Busca una tabla de resultados en la página y devuelve lista de dicts normalizados.
-    Es robusto a celdas con múltiples números dentro.
-    """
-    soup = BeautifulSoup(html, "lxml")
-    tables = soup.find_all("table")
-    results: List[Dict[str, Any]] = []
-
-    for tbl in tables:
-        body = tbl.find("tbody") or tbl
-        rows = body.find_all("tr")
-        if len(rows) < 3:
+    rows = table.find_all("tr")
+    # saltamos cabecera
+    for tr in rows[1:]:
+        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if not tds:
             continue
 
-        for i, tr in enumerate(rows):
-            tds = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
-            # salta cabeceras
-            if i == 0 and any(x.upper().startswith("FECHA") for x in tds):
-                continue
-            if len(tds) < 2:
-                continue
-            item = _normalize_row(game, tds)
-            if item:
-                results.append(item)
+        # Esperamos ~ 1 + 6 + 1 + 1 = 9 columnas
+        try:
+            fecha = tds[0]
+            # normalizamos fecha dd/mm/yyyy o dd-mm-yyyy
+            fecha = fecha.replace("-", "/")
+            d = datetime.strptime(fecha, "%d/%m/%Y").date()
 
-        # Si hemos recogido suficientes filas, no seguimos buscando más tablas
-        if len(results) >= 3:
-            break
+            comb = []
+            # columnas 1..6 (6 bolas)
+            for x in tds[1:7]:
+                m = re.search(r"\d+", x or "")
+                comb.append(int(m.group(0)) if m else None)
+            # complementario (índice 7)
+            comp = int(re.search(r"\d+", tds[7]).group(0)) if len(tds) > 7 and re.search(r"\d+", tds[7]) else None
+            # reintegro (índice 8)
+            rein = int(re.search(r"\d+", tds[8]).group(0)) if len(tds) > 8 and re.search(r"\d+", tds[8]) else None
 
-    return results
+            out.append({
+                "game": game_key,
+                "date": d.isoformat(),
+                "numbers": comb[:6],
+                "complementario": comp,
+                "reintegro": rein,
+                "source": "lotoideas",
+            })
+        except Exception:
+            # fila que no cumple, la ignoramos
+            continue
+    return out
 
+def iso_now():
+    return datetime.utcnow().isoformat() + "Z"
 
-# ======== I/O ========
-
-def write_json(path: str, payload: Dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+def write_json(payload, outfile):
+    with open(outfile, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
