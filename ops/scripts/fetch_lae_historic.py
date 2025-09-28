@@ -7,9 +7,10 @@ OUTFILE = os.environ.get("OUT_HIST", "docs/api/lae_historico.json")
 def main():
     results = []
     for game in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
-        results.extend(fetch_game(game))
+        data = fetch_game(game)
+        results.extend(data)
 
-    # Orden descendente por fecha para consistencia
+    # ordenar por fecha desc para consistencia
     results.sort(key=lambda x: x.get("date",""), reverse=True)
 
     payload = build_payload(results)
