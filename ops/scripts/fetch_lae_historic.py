@@ -1,14 +1,30 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-from fetch_lae_common import scrape_all, build_payload_historic, write_json, API_DIR
+import sys
+from fetch_lae_common import fetch_game, dump_payload
 
-MAX_PAGES = 12  # ajusta fondo histórico
-
-def main():
-    data = scrape_all(max_pages=MAX_PAGES)
-    payload = build_payload_historic(data)
-    write_json(API_DIR / "lae_historico.json", payload)
-    print(f"[done] historico listo con {len(payload.get('results',[]))} sorteos")
+def main(outfile: str):
+    errors = []
+    results = []
+    for g in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
+        try:
+            # Histórico: recorre varias páginas (ajusta si quieres más cobertura)
+            page_results = fetch_game(g, max_pages=6)
+            if page_results:
+                results.extend(page_results)
+            else:
+                errors.append(f"{g}: no_data")
+        except Exception as e:
+            errors.append(f"{g}: {e.__class__.__name__}: {e}")
+    # ordena por fecha descendente si vienen mezcladas
+    def keyf(r):
+        # dd/mm/aaaa -> aaaa-mm-dd para ordenar
+        try:
+            d, m, y = r["date"].split("/")
+            return (int(y), int(m), int(d))
+        except Exception:
+            return (0,0,0)
+    results.sort(key=keyf, reverse=True)
+    dump_payload(outfile, results, errors)
 
 if __name__ == "__main__":
-    main()
+    out = sys.argv[1] if len(sys.argv) > 1 else "docs/api/lae_historico.json"
+    main(out)
