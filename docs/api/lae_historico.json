@@ -1,10 +1,10 @@
 {
-  "generated_at": "2025-09-28T17:27:36.752017Z",
+  "generated_at": "2025-09-29T13:10:03.611091Z",
   "results": [],
-  "errors": [
-    "PRIMITIVA page 1: Page.wait_for_selector: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"table\") to be visible\n",
-    "BONOLOTO page 1: Page.wait_for_selector: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"table\") to be visible\n",
-    "GORDO page 1: Page.wait_for_selector: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"table\") to be visible\n",
-    "EURO page 1: Page.wait_for_selector: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"table\") to be visible\n"
-  ]
+  "by_game_counts": {
+    "PRIMITIVA": 0,
+    "BONOLOTO": 0,
+    "GORDO": 0,
+    "EURO": 0
+  }
 }
