@@ -22,17 +22,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (Playwright)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install playwright
-          python -m playwright install --with-deps chromium
+          pip install requests
 
-      - name: Fetch LAE historic (browser) -> docs/api
+      - name: Fetch LAE historic (HTML days+neighbors) -> docs/api
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          python ops/scripts/fetch_lae_historic_browser.py
+          python ops/scripts/fetch_lae_by_dates.py
 
       - name: Commit & push JSON changes
         run: |
