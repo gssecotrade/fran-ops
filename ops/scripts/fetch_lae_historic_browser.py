@@ -1,290 +1,262 @@
 # ops/scripts/fetch_lae_historic_browser.py
-# Scrape "oficial" LAE usando Playwright:
-# - Abre la web de cada juego para obtener cookies/sesión.
-# - Llama al endpoint XHR de LAE DESDE el contexto de la página (sin 403).
-# - Normaliza y guarda: docs/api/lae_historico.json, lae_latest.json y particionados.
+import os, json, re, time, random
+from datetime import datetime, date
+from typing import Any, Dict, List
 
-import os, json, time, math
-from datetime import date, datetime
-from typing import Dict, List, Any
-
-# Playwright (API síncrona)
-from playwright.sync_api import sync_playwright
-
-# ================== CONFIG ==================
+# Config general
 OUT_DIR = os.path.join("docs", "api")
-
-# Años que quieres cubrir (ajusta según tu pipeline)
-START_YEAR = 2020       # <<< pide últimos 5 años
+START_YEAR = 2020                       # histórico desde 2020 (rápido para producción)
 END_YEAR   = date.today().year
 
-# Mapa de juegos -> variantes admitidas por LAE en "game_id"
-# (probamos en este orden hasta que devuelva datos)
-GAMES: Dict[str, List[str]] = {
-    "PRIMITIVA": ["LA PRIMITIVA", "PRIMITIVA", "LAPRIMITIVA"],
-    "BONOLOTO" : ["BONOLOTO"],
-    "GORDO"    : ["EL GORDO DE LA PRIMITIVA", "EL GORDO", "GORDO"],
-    "EURO"     : ["EUROMILLONES", "EURO MILLONES", "EURO"],
-}
-
-# URLs públicas del portal (para levantar sesión/cookies)
-PORTAL_PAGES = {
+GAMES = {
     "PRIMITIVA": "https://www.loteriasyapuestas.es/es/la-primitiva/sorteos",
-    "BONOLOTO" : "https://www.loteriasyapuestas.es/es/bonoloto/sorteos",
-    "GORDO"    : "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos",
-    "EURO"     : "https://www.loteriasyapuestas.es/es/euromillones/sorteos",
+    "BONOLOTO":  "https://www.loteriasyapuestas.es/es/bonoloto/sorteos",
+    "GORDO":     "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos",
+    "EURO":      "https://www.loteriasyapuestas.es/es/euromillones/sorteos",
 }
 
-# Endpoint real que usa la web
-XHR_BASE = "https://www.loteriasyapuestas.es/servicios/buscadorSorteos"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
-# Timeout de navegación/llamadas
-NAV_TIMEOUT_MS = 40_000
+# ---------------- Playwright helpers ----------------
+def _with_playwright():
+    """Context manager perezoso para no importar playwright si no se usa desde CLI."""
+    from playwright.sync_api import sync_playwright
+    return sync_playwright()
 
-
-# ============== UTILIDADES =================
-def ensure_dir(path: str) -> None:
+def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
+def year_ok(iso_or_dmy: str) -> bool:
+    """filtra por rango de años configurado."""
+    y = None
+    s = iso_or_dmy.strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            y = datetime.strptime(s, fmt).year
+            break
+        except:
+            pass
+    if y is None:
+        # intenta “YYYY” a pelo
+        m = re.search(r"\b(19|20)\d{2}\b", s)
+        if m:
+            y = int(m.group(0))
+    return (y is not None) and (START_YEAR <= y <= END_YEAR)
 
 def normalize_draw(game_key: str, raw: Dict[str, Any]) -> Dict[str, Any] | None:
     """
-    Convierte la respuesta cruda de LAE a un formato estable:
-    {
-      game, date, numbers[...], complementario?, reintegro?, claves?, estrellas?
-    }
+    Dado un dict “raw” (procedente del estado pre-cargado o XHR),
+    intenta normalizar a {game,date,numbers,complementario?,reintegro?,estrellas?}
     """
-    fecha = (raw.get("fecha_sorteo") or raw.get("fechaSorteo") or raw.get("fecha") or "").strip()
-    if not fecha:
+    # Posibles campos de fecha
+    fecha = (
+        raw.get("fecha_sorteo") or raw.get("fechaSorteo")
+        or raw.get("fecha") or raw.get("date") or ""
+    )
+    if not isinstance(fecha, str) or not fecha:
+        return None
+    if not year_ok(fecha):
         return None
 
-    # números (pueden venir como lista o string)
+    # Combinación principal
     numeros: List[int] = []
-    comb = raw.get("combinacion") or raw.get("combinacionNumeros") or raw.get("numeros") or raw.get("bolas") or ""
-    if isinstance(comb, list):
-        for x in comb:
-            try:
-                numeros.append(int(x))
-            except Exception:
-                pass
-    elif isinstance(comb, str):
-        parts = [p for p in comb.replace(",", " ").replace("-", " ").split() if p.strip()]
+    combo = (
+        raw.get("combinacion") or raw.get("combinacionNumeros")
+        or raw.get("numeros") or raw.get("bolas") or raw.get("numerosSorteo")
+    )
+    if isinstance(combo, str):
+        parts = re.split(r"[^\d]+", combo)
         for p in parts:
-            try:
-                numeros.append(int(p))
-            except Exception:
-                pass
+            if p.isdigit():
+                try: numeros.append(int(p))
+                except: pass
+    elif isinstance(combo, list):
+        for v in combo:
+            try: numeros.append(int(v))
+            except: pass
 
-    out: Dict[str, Any] = {
-        "game": game_key,
-        "date": fecha,
-        "numbers": numeros[:6] if numeros else [],
-    }
+    # Campos extra
+    comp = raw.get("complementario")
+    rein = raw.get("reintegro")
+    clave = raw.get("clave")
 
-    # campos opcionales (según juego)
-    if raw.get("complementario") is not None:
-        out["complementario"] = raw.get("complementario")
-
-    if raw.get("reintegro") is not None:
-        out["reintegro"] = raw.get("reintegro")
-
-    # "clave" (El Gordo)
-    if raw.get("clave") is not None:
-        out["clave"] = raw.get("clave")
-
-    # Estrellas (Euromillones)
     e1 = raw.get("estrella1") or raw.get("estrella_1")
     e2 = raw.get("estrella2") or raw.get("estrella_2")
-    est = [e for e in (e1, e2) if e is not None]
-    if est:
-        out["estrellas"] = est
+    estrellas = []
+    if e1 is not None: estrellas.append(e1)
+    if e2 is not None: estrellas.append(e2)
 
+    out = {"game": game_key, "date": fecha, "numbers": numeros[:6] if numeros else []}
+    if comp is not None: out["complementario"] = comp
+    if rein is not None: out["reintegro"] = rein
+    if clave is not None: out["clave"] = clave
+    if estrellas: out["estrellas"] = estrellas
     return out
 
-
-def flatten(list_of_lists: List[List[Any]]) -> List[Any]:
-    res: List[Any] = []
-    for sub in list_of_lists:
-        res.extend(sub)
-    return res
-
-
-def latest_by_game(all_draws: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
+def deep_find_drawish_dicts(obj: Any) -> List[Dict[str, Any]]:
     """
-    Devuelve el sorteo más reciente por juego (según fecha).
+    Busca dentro de un JSON estructuras que “parezcan” sorteos:
+    con fecha + combinación/bolas/… Devuelve lista de dicts candidatos.
     """
-    def parse_dt(s: str) -> datetime | None:
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+    found: List[Dict[str, Any]] = []
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            keys = set(node.keys())
+            has_fecha = any(k in keys for k in ["fecha", "fechaSorteo", "fecha_sorteo", "date"])
+            has_combo = any(k in keys for k in ["combinacion", "combinacionNumeros", "numeros", "bolas", "numerosSorteo"])
+            if has_fecha and has_combo:
+                found.append(node)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for it in node:
+                walk(it)
+
+    walk(obj)
+    return found
+
+# ----------------- Core scraping -----------------
+def fetch_game_draws_from_page(game_key: str, url: str) -> List[Dict[str, Any]]:
+    """
+    Carga la página pública del juego, extrae window.__PRELOADED_STATE__ y/o XHRs JSON,
+    y normaliza los sorteos al formato común.
+    """
+    with _with_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=[
+            "--disable-blink-features=AutomationControlled",
+        ])
+        page = browser.new_page(
+            user_agent=USER_AGENT,
+            locale="es-ES",
+            extra_http_headers={
+                "Accept-Language": "es-ES,es;q=0.9",
+                "Upgrade-Insecure-Requests": "1",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            }
+        )
+
+        # Captura XHR/JSON por si la página los usa en vez de estado pre-cargado
+        xhr_json_blobs: List[Any] = []
+        def on_response(resp):
             try:
-                return datetime.strptime(s, fmt)
-            except Exception:
+                ctype = resp.headers.get("content-type", "")
+                if "application/json" in ctype and "/servicios/" in resp.url:
+                    xhr_json_blobs.append(resp.json())
+            except:
                 pass
-        return None
+        page.on("response", on_response)
 
-    latest: Dict[str, Dict[str, Any]] = {}
-    for g, arr in all_draws.items():
+        # Navega y espera o bien “idle” o un selector típico del listado
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        # margen para que dispare XHRs si los hubiera
+        page.wait_for_timeout(1500)
+
+        # 1) intenta leer el estado pre-cargado directamente desde JS (mejor que regex)
+        state = None
+        try:
+            state = page.evaluate("() => window.__PRELOADED_STATE__ || null")
+        except Exception:
+            state = None
+
+        # Fallback: si no hay estado, toma el HTML y busca con regex
+        if not state:
+            html = page.content()
+            m = re.search(r"window\.__PRELOADED_STATE__\s*=\s*({.*?});", html, re.S)
+            if m:
+                try:
+                    state = json.loads(m.group(1))
+                except Exception:
+                    state = None
+
+        browser.close()
+
+    candidates: List[Dict[str, Any]] = []
+    if state:
+        candidates.extend(deep_find_drawish_dicts(state))
+    for blob in xhr_json_blobs:
+        candidates.extend(deep_find_drawish_dicts(blob))
+
+    # normaliza + filtra por año
+    out: List[Dict[str, Any]] = []
+    for raw in candidates:
+        d = normalize_draw(game_key, raw)
+        if d:
+            out.append(d)
+
+    # de-dup básico por (date, numbers)
+    seen = set()
+    uniq: List[Dict[str, Any]] = []
+    for d in out:
+        key = (d["date"], tuple(d.get("numbers", [])))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(d)
+    return uniq
+
+def latest_by_game(draws: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Último sorteo por juego (para docs/api/lae_latest.json)."""
+    res = []
+    for g, arr in draws.items():
+        def parse_dt(s: str):
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"):
+                try: return datetime.strptime(s, fmt)
+                except: pass
+            return None
         best = None
         best_dt = None
         for d in arr:
-            dt = parse_dt(d.get("date", "")) if d else None
+            dt = parse_dt(d["date"])
             if dt and (best_dt is None or dt > best_dt):
-                best_dt = dt
-                best = d
-        if best:
-            latest[g] = best
-    return latest
+                best_dt = dt; best = d
+        if best: res.append(best)
+    return res
 
-
-# ============ CORE: scraping con Playwright ============
-def fetch_year_with_browser(page, game_key: str, game_id: str, year: int) -> List[Dict[str, Any]]:
-    """
-    Ejecuta DESDE el contexto de la página (con cookies/origin de LAE) una llamada fetch()
-    al endpoint XHR oficial para el año indicado. Devuelve lista normalizada de sorteos.
-    """
-    start = f"{year}-01-01"
-    end   = f"{year}-12-31"
-
-    url = (
-        f"{XHR_BASE}"
-        f"?game_id={game_id.replace(' ', '%20')}"
-        f"&fechaInicioInclusiva={start}"
-        f"&fechaFinInclusiva={end}"
-    )
-
-    # Hacemos fetch dentro de la página para heredar cookies/origin y evitar 403
-    js = """
-        async (url) => {
-          const res = await fetch(url, {
-            method: 'GET',
-            credentials: 'include',
-            headers: {
-              'Accept': 'application/json, text/plain, */*'
-            }
-          });
-          const txt = await res.text();
-          // El servicio devuelve JSON; si por lo que sea llega HTML, devolvemos objeto vacío
-          try { return JSON.parse(txt); } catch (e) { return {error: 'non-json', text: txt}; }
-        }
-    """
-
-    # Intentos con backoff suave (anti intermitencias)
-    tries = 4
-    last_err = None
-    for i in range(1, tries + 1):
-        try:
-            data = page.evaluate(js, url)
-            if isinstance(data, dict) and ("error" not in data):
-                items = (
-                    data.get("busqueda")
-                    or data.get("sorteos")
-                    or data.get("resultados")
-                    or data.get("buscador")
-                    or []
-                )
-                if isinstance(items, dict):
-                    # buscar la primera lista dentro
-                    found = None
-                    for v in items.values():
-                        if isinstance(v, list):
-                            found = v
-                            break
-                    items = found or []
-                if not isinstance(items, list):
-                    items = []
-
-                out: List[Dict[str, Any]] = []
-                for raw in items:
-                    d = normalize_draw(game_key, raw)
-                    if d:
-                        out.append(d)
-                return out
-            else:
-                last_err = f"Respuesta no JSON o con error: {str(data)[:160]}"
-        except Exception as e:
-            last_err = str(e)
-
-        # backoff modesto
-        time.sleep(0.6 * i)
-
-    print(f"[warn] {game_key} {year} '{game_id}' -> no datos ({last_err})")
-    return []
-
-
-def fetch_game_history(page, game_key: str) -> List[Dict[str, Any]]:
-    """
-    Abre la página pública del juego (cookies/sesión) y consulta año a año con
-    las variantes de game_id hasta conseguir resultados o agotar variantes.
-    """
-    url = PORTAL_PAGES[game_key]
-    print(f"[run] {game_key} :: {url}")
-    page.goto(url, timeout=NAV_TIMEOUT_MS)
-    page.wait_for_load_state("domcontentloaded")
-
-    all_years: List[Dict[str, Any]] = []
-    variants = GAMES[game_key]
-
-    for year in range(START_YEAR, END_YEAR + 1):
-        got: List[Dict[str, Any]] = []
-        for gid in variants:
-            got = fetch_year_with_browser(page, game_key, gid, year)
-            if got:  # si hay resultados, no probamos más variantes ese año
-                break
-        print(f"[sum] {game_key} {year} -> {len(got)} sorteos")
-        all_years.extend(got)
-
-    return all_years
-
-
-def main() -> None:
+def main():
     print("=== LAE · HISTÓRICO (browser) · start ===")
     print(f"[cfg] Años: {START_YEAR}..{END_YEAR}")
     ensure_dir(OUT_DIR)
 
-    all_draws: Dict[str, List[Dict[str, Any]]] = {k: [] for k in GAMES.keys()}
+    all_by_game: Dict[str, List[Dict[str, Any]]] = {k: [] for k in GAMES.keys()}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = browser.new_context(locale="es-ES")
-        page = context.new_page()
+    for game, url in GAMES.items():
+        print(f"[run] {game} :: {url}")
+        try:
+            draws = fetch_game_draws_from_page(game, url)
+            print(f"[sum] {game} -> {len(draws)} sorteos")
+            all_by_game[game] = draws
+        except Exception as e:
+            print(f"[warn] {game} -> error {e}")
+        # pequeñísima pausa (humano)
+        time.sleep(0.5 + random.uniform(0, 0.4))
 
-        # PRIMITIVA, BONOLOTO, GORDO, EURO
-        for game_key in ["PRIMITIVA", "BONOLOTO", "GORDO", "EURO"]:
-            try:
-                draws = fetch_game_history(page, game_key)
-                all_draws[game_key] = draws
-            except Exception as e:
-                print(f"[err] {game_key}: {e}")
-                all_draws[game_key] = []
-            # respirito entre juegos (evita rate-limit)
-            time.sleep(0.8)
-
-        browser.close()
-
-    # ---------- Persistencia ----------
-    generated = datetime.utcnow().isoformat() + "Z"
-
-    # Maestro conjunto
+    # payload maestro
     payload = {
-        "generated_at": generated,
-        "results": flatten(list(all_draws.values())),
-        "by_game_counts": {k: len(v) for k, v in all_draws.items()},
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "results": sum(all_by_game.values(), []),  # lista plana
+        "by_game_counts": {k: len(v) for k, v in all_by_game.items()},
+        "meta": {"from_year": START_YEAR, "to_year": END_YEAR}
     }
+
     with open(os.path.join(OUT_DIR, "lae_historico.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    # Particiones por juego
-    for g, arr in all_draws.items():
+    # particionado por juego (útil para Apps Script)
+    for g, arr in all_by_game.items():
         with open(os.path.join(OUT_DIR, f"{g}.json"), "w", encoding="utf-8") as f:
-            json.dump({"generated_at": generated, "results": arr}, f, ensure_ascii=False, indent=2)
+            json.dump({"generated_at": payload["generated_at"], "results": arr}, f, ensure_ascii=False, indent=2)
 
-    # Latest por juego
-    latest = latest_by_game(all_draws)
+    # latest
+    latest = latest_by_game(all_by_game)
     with open(os.path.join(OUT_DIR, "lae_latest.json"), "w", encoding="utf-8") as f:
-        json.dump({"generated_at": generated, "results": list(latest.values())}, f, ensure_ascii=False, indent=2)
+        json.dump({"generated_at": payload["generated_at"], "results": latest}, f, ensure_ascii=False, indent=2)
 
     print("=== LAE · HISTÓRICO (browser) · done ===")
     print("by_game_counts:", payload["by_game_counts"])
-
 
 if __name__ == "__main__":
     main()
