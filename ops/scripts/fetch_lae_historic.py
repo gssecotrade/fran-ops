@@ -1,29 +1,47 @@
 # ops/scripts/fetch_lae_historic.py
-import os, sys, json, time, math, random
+import os, sys, json, time, random
 from datetime import datetime, date
 import requests
 
 # ---------- Config ----------
 OUT_DIR = os.path.join("docs", "api")
+
 GAMES = {
     "PRIMITIVA": ["LA PRIMITIVA", "PRIMITIVA", "LAPRIMITIVA"],
     "BONOLOTO":  ["BONOLOTO"],
     "GORDO":     ["EL GORDO DE LA PRIMITIVA", "EL GORDO", "GORDO"],
     "EURO":      ["EUROMILLONES", "EURO MILLONES", "EURO"]
 }
-# años a cubrir (ajústalo si quieres todo el histórico)
-START_YEAR = 1985
-END_YEAR   = date.today().year
 
+# Rango de años (por defecto: desde 2020 al año actual).
+# Se puede sobrescribir con variables de entorno LAE_START_YEAR y LAE_END_YEAR
+def _int_env(name: str, default: int) -> int:
+    try:
+        v = os.getenv(name, "")
+        return int(v) if v.strip() else default
+    except Exception:
+        return default
+
+DEFAULT_START = 2020
+START_YEAR = _int_env("LAE_START_YEAR", DEFAULT_START)
+END_YEAR   = _int_env("LAE_END_YEAR", date.today().year)
+
+# Endpoint oficial
 BASE = "https://www.loteriasyapuestas.es/servicios/buscadorSorteos"
 
-# Cabeceras realistas (importante para reducir 403)
+# Cabeceras realistas (ayuda a reducir 403)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
     "Referer": "https://www.loteriasyapuestas.es/",
+    "Origin": "https://www.loteriasyapuestas.es",
     "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
 SESSION = requests.Session()
@@ -31,8 +49,12 @@ SESSION.headers.update(HEADERS)
 TIMEOUT = 25
 
 def retry_get(url, params, tries=5, base_sleep=0.8):
+    """
+    GET con reintentos y backoff exponencial + jitter.
+    Devuelve dict JSON o lanza RuntimeError con el último error.
+    """
     last = None
-    for i in range(1, tries+1):
+    for i in range(1, tries + 1):
         try:
             r = SESSION.get(url, params=params, timeout=TIMEOUT)
             if r.status_code == 200 and r.text.strip().startswith("{"):
@@ -41,7 +63,7 @@ def retry_get(url, params, tries=5, base_sleep=0.8):
         except Exception as e:
             last = str(e)
         # backoff + jitter
-        time.sleep(base_sleep * (2 ** (i-1)) + random.uniform(0, 0.4))
+        time.sleep(base_sleep * (2 ** (i - 1)) + random.uniform(0, 0.4))
     raise RuntimeError(f"Fallo GET JSON: {url}?{params} ({last})")
 
 def normalize_draw(game_key, raw):
@@ -53,9 +75,14 @@ def normalize_draw(game_key, raw):
 
     # Normalización de números
     numeros = []
-    comb = raw.get("combinacion") or raw.get("combinacionNumeros") or raw.get("numeros") or raw.get("bolas") or ""
+    comb = (
+        raw.get("combinacion")
+        or raw.get("combinacionNumeros")
+        or raw.get("numeros")
+        or raw.get("bolas")
+        or ""
+    )
     if isinstance(comb, str):
-        # Split robusto
         parts = [p for p in comb.replace(",", " ").replace("-", " ").split() if p.strip()]
         for p in parts:
             try:
@@ -76,20 +103,25 @@ def normalize_draw(game_key, raw):
     e1 = raw.get("estrella1") or raw.get("estrella_1")
     e2 = raw.get("estrella2") or raw.get("estrella_2")
 
-    # Genera salida consistente
     out = {
         "game": game_key,
         "date": fecha,
         "numbers": numeros[:6] if numeros else [],
     }
-    if complementario is not None: out["complementario"] = complementario
-    if reintegro is not None:     out["reintegro"] = reintegro
-    if clave is not None:         out["clave"] = clave
+    if complementario is not None:
+        out["complementario"] = complementario
+    if reintegro is not None:
+        out["reintegro"] = reintegro
+    if clave is not None:
+        out["clave"] = clave
     # Euromillones estrellas
     estrellas = []
-    if e1 is not None: estrellas.append(e1)
-    if e2 is not None: estrellas.append(e2)
-    if estrellas: out["estrellas"] = estrellas
+    if e1 is not None:
+        estrellas.append(e1)
+    if e2 is not None:
+        estrellas.append(e2)
+    if estrellas:
+        out["estrellas"] = estrellas
     return out
 
 def fetch_year_for_variants(game_key, year, variants):
@@ -97,18 +129,23 @@ def fetch_year_for_variants(game_key, year, variants):
     end   = f"{year}-12-31"
     all_draws = []
     # probamos varias variantes de game_id
-    for idx, gid in enumerate(variants):
+    for gid in variants:
         params = {
             "game_id": gid,
             "fechaInicioInclusiva": start,
-            "fechaFinInclusiva": end
+            "fechaFinInclusiva": end,
         }
         try:
             data = retry_get(BASE, params)
-            # LAE devuelve estructura con 'buscador' o 'sorteos'
+            # LAE devuelve estructura con 'busqueda' o 'sorteos'
             # intentemos encontrar lista de sorteos
-            items = data.get("busqueda") or data.get("sorteos") or data.get("resultados") or data.get("buscador") or []
-            # a veces la lista está en 'resultados' anidado
+            items = (
+                data.get("busqueda")
+                or data.get("sorteos")
+                or data.get("resultados")
+                or data.get("buscador")
+                or []
+            )
             if isinstance(items, dict):
                 # buscar una clave que sea lista
                 for v in items.values():
@@ -157,6 +194,7 @@ def latest_by_game(draws):
             except:
                 pass
         return None
+
     res = {}
     for g, arr in draws.items():
         best = None
@@ -175,6 +213,7 @@ def ensure_dir(p):
 
 def main():
     print("=== LAE · HISTÓRICO · start ===")
+    print(f"[cfg] Años: {START_YEAR}..{END_YEAR}")
     ensure_dir(OUT_DIR)
     all_draws = fetch_full_history()
 
@@ -191,12 +230,22 @@ def main():
     # particionados
     for g, arr in all_draws.items():
         with open(os.path.join(OUT_DIR, f"{g}.json"), "w", encoding="utf-8") as f:
-            json.dump({"generated_at": payload["generated_at"], "results": arr}, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {"generated_at": payload["generated_at"], "results": arr},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
     # latest
     latest = latest_by_game(all_draws)
     with open(os.path.join(OUT_DIR, "lae_latest.json"), "w", encoding="utf-8") as f:
-        json.dump({"generated_at": payload["generated_at"], "results": list(latest.values())}, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {"generated_at": payload["generated_at"], "results": list(latest.values())},
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     print("=== LAE · HISTÓRICO · done ===")
     print("by_game_counts:", payload["by_game_counts"])
