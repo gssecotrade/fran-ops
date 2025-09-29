@@ -1,270 +1,250 @@
 # ops/scripts/fetch_lae_spider.py
-import os, re, json, asyncio, math, sys
-from datetime import datetime, date
-from pathlib import Path
+import os, json, asyncio, math, random
+from datetime import date, datetime
+from typing import Dict, Any, List
 
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
-OUT_API_DIR = Path("docs/api")
-OUT_HTML_DIR = Path("docs/lae_html")   # para auditoría / ajuste de selectores
-OUT_API_DIR.mkdir(parents=True, exist_ok=True)
-OUT_HTML_DIR.mkdir(parents=True, exist_ok=True)
+OUT_DIR = os.path.join("docs", "api")
+os.makedirs(OUT_DIR, exist_ok=True)
 
+# Rango a cubrir (ajústalo si quieres)
 START_YEAR = 2020
-END_YEAR = date.today().year
+END_YEAR   = date.today().year
 
+# Mapa de juegos → (url pública para referer/same-origin, game_id para API)
 GAMES = {
-    # nombre interno  :  (ruta indice sorteos, patrón dominio en href)
-    "PRIMITIVA": ("https://www.loteriasyapuestas.es/es/la-primitiva/sorteos", r"/la-primitiva/"),
-    "BONOLOTO" : ("https://www.loteriasyapuestas.es/es/bonoloto/sorteos", r"/bonoloto/"),
-    "GORDO"    : ("https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos", r"/el-gordo-de-la-primitiva/"),
-    "EURO"     : ("https://www.loteriasyapuestas.es/es/euromillones/sorteos", r"/euromillones/"),
+    "PRIMITIVA": {
+        "list_url": "https://www.loteriasyapuestas.es/es/la-primitiva/sorteos",
+        "ids": ["LA PRIMITIVA", "PRIMITIVA", "LAPRIMITIVA"],
+    },
+    "BONOLOTO": {
+        "list_url": "https://www.loteriasyapuestas.es/es/bonoloto/sorteos",
+        "ids": ["BONOLOTO"],
+    },
+    "GORDO": {
+        "list_url": "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos",
+        "ids": ["EL GORDO DE LA PRIMITIVA", "EL GORDO", "GORDO"],
+    },
+    "EURO": {
+        "list_url": "https://www.loteriasyapuestas.es/es/euromillones/sorteos",
+        "ids": ["EUROMILLONES", "EURO MILLONES", "EURO"],
+    },
 }
 
-# Selectores bastante genéricos (podemos afinarlos tras 1ª corrida con los HTML guardados)
-SEL_CARD_LINKS = "a[href*='sorteos']"
-SEL_LOAD_MORE  = "button:has-text('Cargar más'), button:has-text('Ver más'), a:has-text('Cargar más'), a:has-text('Ver más')"
+SERVICE_PATH = "/servicios/buscadorSorteos"
 
-# Extraer números: probamos varios patrones comunes
-RE_NUM = re.compile(r"\b(\d{1,2})\b")
-# “Complementario”, “Reintegro”, “Estrellas”, “Clave”
-RE_COMP = re.compile(r"[Cc]omplementari[oa]\D+(\d{1,2})")
-RE_REIN = re.compile(r"[Rr]eintegr[oa]\D+(\d)")
-RE_CLAVE= re.compile(r"[Cc]lave\D+(\d{1,2})")
-RE_EST  = re.compile(r"[Ee]strella[s]?\D+(\d{1,2})\D+(\d{1,2})")
+def _normalize_draw(game_key: str, raw: Dict[str, Any]) -> Dict[str, Any] | None:
+    # fecha*
+    fecha = (
+        raw.get("fecha_sorteo")
+        or raw.get("fechaSorteo")
+        or raw.get("fecha")
+        or ""
+    )
+    if not fecha:
+        return None
 
-def safe_write(path: Path, content: bytes):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
+    # Números: muchos formatos posibles
+    nums: List[int] = []
+    comb = (
+        raw.get("combinacion")
+        or raw.get("combinacionNumeros")
+        or raw.get("numeros")
+        or raw.get("bolas")
+        or ""
+    )
+    if isinstance(comb, str):
+        for p in comb.replace(",", " ").replace("-", " ").split():
+            try:
+                nums.append(int(p))
+            except:
+                pass
+    elif isinstance(comb, list):
+        for p in comb:
+            try:
+                nums.append(int(p))
+            except:
+                pass
 
-async def scroll_or_load_more(page):
-    """Intenta click en 'Cargar más' si existe; si no, hace scroll suave."""
-    try:
-        btn = page.locator(SEL_LOAD_MORE)
-        if await btn.count() > 0:
-            await btn.first.click(timeout=1500)
-            await page.wait_for_timeout(700)
-            return True
-    except PWTimeout:
-        pass
-    # Scroll hasta abajo
-    before = await page.evaluate("() => document.documentElement.scrollHeight")
-    await page.mouse.wheel(0, 2500)
-    await page.wait_for_timeout(700)
-    after = await page.evaluate("() => document.documentElement.scrollHeight")
-    return after > before
-
-def extract_date_from_text(text: str) -> str | None:
-    """
-    Intenta sacar una fecha 'YYYY-MM-DD' del texto (o del href si lo incluimos).
-    """
-    # Formatos típicos ‘dd/mm/yyyy’, ‘dd-mm-yyyy’
-    m = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
-    if m:
-        d, mth, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return datetime(y, mth, d).strftime("%Y-%m-%d")
-        except Exception:
-            return None
-    # o ‘yyyy-mm-dd’
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-    return None
-
-def quick_parse_numbers(html: str, game_key: str):
-    """
-    Parser 'rápido' por expresiones regulares del HTML. Deja todo en campos opcionales
-    y guarda lo que encuentre. Ajustaremos si hace falta tras ver los HTML.
-    """
-    # Quitar scripts para que RE_NUM no pille ids numéricos de JS
-    cleaned = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S|re.I)
-    # En Euromillones suelen aparecer 5+2; en Primitiva/Bonoloto 6 (+comp + reintegro).
-    nums = [int(x) for x in RE_NUM.findall(cleaned)]
-    # Heurística: limitamos a 15 primeros “candidatos” visibles
-    nums = nums[:15]
-
-    out = {}
-    # Complementario/Reintegro/Clave/Estrellas
-    m = RE_COMP.search(cleaned)
-    if m: out["complementario"] = int(m.group(1))
-    m = RE_REIN.search(cleaned)
-    if m: out["reintegro"] = int(m.group(1))
-    m = RE_CLAVE.search(cleaned)
-    if m: out["clave"] = int(m.group(1))
-    m = RE_EST.search(cleaned)
-    if m: out["estrellas"] = [int(m.group(1)), int(m.group(2))]
-
-    # Números principales: heurística por juego
-    if game_key in ("PRIMITIVA", "BONOLOTO", "GORDO"):
-        # coge los 6 más razonables (1..49/54)
-        main = [n for n in nums if 1 <= n <= 60][:6]
-        out["numbers"] = main
-    else:  # EURO
-        main = [n for n in nums if 1 <= n <= 70][:5]
-        out["numbers"] = main
-        if "estrellas" not in out:
-            stars = [n for n in nums if 1 <= n <= 12]
-            out["estrellas"] = stars[:2]
+    out: Dict[str, Any] = {
+        "game": game_key,
+        "date": fecha,
+        "numbers": nums[:6] if nums else [],
+    }
+    # Campos adicionales si existen
+    for k in ("complementario", "reintegro", "clave"):
+        if k in raw and raw[k] is not None:
+            out[k] = raw[k]
+    e1 = raw.get("estrella1") or raw.get("estrella_1")
+    e2 = raw.get("estrella2") or raw.get("estrella_2")
+    stars = []
+    if e1 is not None: stars.append(e1)
+    if e2 is not None: stars.append(e2)
+    if stars: out["estrellas"] = stars
     return out
 
-async def crawl_game(context, game_key: str, index_url: str, href_pattern: str):
-    page = await context.new_page()
-    await page.route("**/*", lambda route: route.continue_())  # no bloqueamos nada
-    await page.goto(index_url, wait_until="domcontentloaded", timeout=60_000)
-
-    print(f"[run] {game_key} :: {index_url}")
-
-    # Descubrimos enlaces de sorteos hasta cubrir START_YEAR
-    links = set()
-    last_len = -1
-    idle_rounds = 0
-
-    for _ in range(80):  # cota de seguridad
-        # capturamos todo enlace con patrón del juego + 'sorteos'
-        anchors = page.locator(SEL_CARD_LINKS)
-        count = await anchors.count()
-        for i in range(count):
-            href = await anchors.nth(i).get_attribute("href")
-            if not href:
-                continue
-            if re.search(href_pattern, href):
-                links.add(href)
-
-        # ¿ya tenemos enlaces de 2020..hoy?
-        # Si alguno lleva fecha en el propio href, úsala para decidir si seguir.
-        years_seen = set()
-        for href in links:
-            m = re.search(r"(\d{4})", href)
-            if m:
-                years_seen.add(int(m.group(1)))
-        if any(y <= START_YEAR for y in years_seen):
-            break
-
-        # si no crece el número de enlaces, contamos rondas “inactiva”
-        if len(links) == last_len:
-            idle_rounds += 1
-        else:
-            idle_rounds = 0
-        last_len = len(links)
-
-        moved = await scroll_or_load_more(page)
-        if not moved:
-            # sin scroll ni botón => paramos si llevamos varias rondas inactivas
-            if idle_rounds >= 3:
-                break
-
-    print(f"[sum] {game_key} => {len(links)} enlaces candidatos")
-
-    # Visitamos cada sorteo, guardamos HTML y parseamos
-    results = []
-    for href in sorted(links):
-        url = href if href.startswith("http") else f"https://www.loteriasyapuestas.es{href}"
-        try:
-            p = await context.new_page()
-            await p.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            # Por si la web tarda en pintar los números
-            await p.wait_for_timeout(800)
-
-            html = await p.content()
-            # Guardamos html crudo para auditoría
-            # Intentamos deducir fecha desde la propia página (title/h1) o el href
-            text_all = await p.locator("body").inner_text()
-            # 1) del texto
-            dt = extract_date_from_text(text_all)
-            # 2) del href (si trae yyyy)
-            if not dt:
-                m = re.search(r"(\d{4})[-/](\d{2})[-/](\d{2})", url)
-                if m:
-                    dt = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-
-            if not dt:
-                # como fallback, usa título
-                title = await p.title()
-                dt = extract_date_from_text(title) or "0000-00-00"
-
-            # guardado html
-            safe_write(OUT_HTML_DIR / game_key / f"{dt}.html", html.encode("utf-8", "ignore"))
-
-            parsed = quick_parse_numbers(html, game_key)
-            parsed["game"] = game_key
-            parsed["date"] = dt
-            results.append(parsed)
-
-            await p.close()
-        except Exception as e:
-            print(f"[warn] {game_key} fallo al abrir {url}: {e}")
-
-    # Filtra rango de años & vacíos
-    def in_range(d):
-        try:
-            y = int(d["date"][:4])
-            return START_YEAR <= y <= END_YEAR
-        except:
-            return False
-
-    results = [d for d in results if d.get("numbers") and in_range(d)]
-    print(f"[sum] {game_key} -> {len(results)} sorteos útiles tras parseo")
-    await page.close()
-    return results
-
-async def main():
-    payload_all = {k: [] for k in GAMES}
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=[
-            "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"
-        ])
-        context = await browser.new_context(
-            user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/118.0 Safari/537.36"),
-            viewport={"width": 1280, "height": 900},
-            locale='es-ES'
-        )
-
-        print("=== LAE · HISTÓRICO (spider) · start ===")
-        print(f"[cfg] Años: {START_YEAR}..{END_YEAR}")
-
-        for g, (idx_url, pat) in GAMES.items():
-            arr = await crawl_game(context, g, idx_url, pat)
-            payload_all[g] = arr
-
-        await context.close()
-        await browser.close()
-
-    flat = []
-    for arr in payload_all.values():
-        flat.extend(arr)
-
-    gen_at = datetime.utcnow().isoformat() + "Z"
-    OUT_API_DIR.mkdir(parents=True, exist_ok=True)
-
-    # maestro
-    with open(OUT_API_DIR / "lae_historico.json", "w", encoding="utf-8") as f:
-        json.dump({"generated_at": gen_at, "results": flat,
-                   "by_game_counts": {k: len(v) for k, v in payload_all.items()}},
-                  f, ensure_ascii=False, indent=2)
-
-    # particionado
-    for g, arr in payload_all.items():
-        with open(OUT_API_DIR / f"{g}.json", "w", encoding="utf-8") as f:
-            json.dump({"generated_at": gen_at, "results": arr}, f, ensure_ascii=False, indent=2)
-
-    # latest por juego
-    def dt_of(d):
-        try:
-            return datetime.strptime(d["date"], "%Y-%m-%d")
-        except:
-            return datetime.min
+def _latest_by_game(draws_by_game: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    def parse_dt(s: str):
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s, fmt)
+            except:
+                pass
+        return None
 
     latest = []
-    for g, arr in payload_all.items():
-        if arr:
-            latest.append(sorted(arr, key=dt_of)[-1])
-    with open(OUT_API_DIR / "lae_latest.json", "w", encoding="utf-8") as f:
-        json.dump({"generated_at": gen_at, "results": latest}, f, ensure_ascii=False, indent=2)
+    for g, arr in draws_by_game.items():
+        best = None
+        best_dt = None
+        for d in arr:
+            dt = parse_dt(d.get("date", "")) or best_dt
+            if dt and (best_dt is None or dt > best_dt):
+                best_dt = dt
+                best = d
+        if best:
+            latest.append(best)
+    return latest
 
-    print("=== LAE · HISTÓRICO (spider) · done ===")
-    print("by_game_counts:", {k: len(v) for k, v in payload_all.items()})
+def fetch_json_same_origin(page, base_url: str, params: Dict[str, str]) -> Dict[str, Any] | None:
+    """
+    Llama a /servicios/buscadorSorteos desde el propio contexto de la página.
+    Evita 403 porque es same-origin con cookies/headers correctos.
+    """
+    # Monta query string
+    from urllib.parse import urlencode
+    qs = urlencode(params, safe="% ")
+    url = SERVICE_PATH + "?" + qs
+
+    script = f"""
+        const url = {json.dumps(url)};
+        try {{
+          const r = await fetch(url, {{
+            method: 'GET',
+            credentials: 'include',
+            headers: {{
+              'Accept': 'application/json, text/plain, */*'
+            }}
+          }});
+          const txt = await r.text();
+          if (!txt || txt.trim().length === 0) return null;
+          try {{
+            return {{ ok: r.ok, status: r.status, body: JSON.parse(txt) }};
+          }} catch(e) {{
+            return {{ ok: r.ok, status: r.status, body: null, raw: txt }};
+          }}
+        }} catch(e) {{
+          return {{ ok: false, status: 0, err: String(e) }};
+        }}
+    """
+    res = page.evaluate(script)
+    if not res or not res.get("ok"):
+        return None
+    body = res.get("body")
+    return body
+
+def run_spider():
+    print("=== LAE · HISTÓRICO (spider via same-origin JSON) · start ===")
+    all_draws: Dict[str, List[Dict[str, Any]]] = {k: [] for k in GAMES.keys()}
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True, args=["--disable-gpu", "--no-sandbox"])
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+        )
+        page = ctx.new_page()
+
+        for game_key, meta in GAMES.items():
+            list_url = meta["list_url"]
+            variants = meta["ids"]
+
+            # Abre la página pública del juego (establece same-origin cookies/headers)
+            page.goto(list_url, wait_until="domcontentloaded", timeout=60000)
+
+            total_game = 0
+            for year in range(START_YEAR, END_YEAR + 1):
+                start = f"{year}-01-01"
+                end   = f"{year}-12-31"
+
+                got_year = False
+                for gid in variants:
+                    params = {
+                        "game_id": gid,
+                        "fechaInicioInclusiva": start,
+                        "fechaFinInclusiva": end,
+                    }
+                    data = fetch_json_same_origin(page, list_url, params)
+                    if not data:
+                        # pequeño backoff y prueba siguiente variante
+                        page.wait_for_timeout(300 + int(200*random.random()))
+                        continue
+
+                    # La estructura exacta puede variar. Buscamos la lista.
+                    items = (
+                        data.get("busqueda")
+                        or data.get("sorteos")
+                        or data.get("resultados")
+                        or data.get("buscador")
+                        or []
+                    )
+                    if isinstance(items, dict):
+                        # si es dict, toma la primera lista que encuentres
+                        lst = None
+                        for v in items.values():
+                            if isinstance(v, list):
+                                lst = v; break
+                        items = lst or []
+
+                    parsed = []
+                    for raw in items if isinstance(items, list) else []:
+                        d = _normalize_draw(game_key, raw)
+                        if d: parsed.append(d)
+
+                    if parsed:
+                        all_draws[game_key].extend(parsed)
+                        total_game += len(parsed)
+                        got_year = True
+                        break  # esa variante funcionó para ese año
+
+                    # si no hubo datos, prueba la siguiente variante tras un pequeño delay
+                    page.wait_for_timeout(200 + int(200*random.random()))
+
+                # pausa corta entre años para no ser agresivos
+                page.wait_for_timeout(200 + int(200*random.random()))
+
+            print(f"[sum] {game_key} => {total_game} sorteos")
+        browser.close()
+
+    generated_at = datetime.utcnow().isoformat() + "Z"
+    flat = []
+    for arr in all_draws.values():
+        flat.extend(arr)
+
+    payload = {
+        "generated_at": generated_at,
+        "results": flat,
+        "by_game_counts": {k: len(v) for k, v in all_draws.items()},
+    }
+
+    # Guarda maestro
+    with open(os.path.join(OUT_DIR, "lae_historico.json"), "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    # Particiones por juego
+    for g, arr in all_draws.items():
+        with open(os.path.join(OUT_DIR, f"{g}.json"), "w", encoding="utf-8") as f:
+            json.dump({"generated_at": generated_at, "results": arr}, f, ensure_ascii=False, indent=2)
+
+    # Latest
+    latest = _latest_by_game(all_draws)
+    with open(os.path.join(OUT_DIR, "lae_latest.json"), "w", encoding="utf-8") as f:
+        json.dump({"generated_at": generated_at, "results": latest}, f, ensure_ascii=False, indent=2)
+
+    print("=== LAE · HISTÓRICO (spider via same-origin JSON) · done ===")
+    print("by_game_counts:", payload["by_game_counts"])
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_spider()
