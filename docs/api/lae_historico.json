@@ -1,14 +1,15 @@
 {
-  "generated_at": "2025-09-29T15:51:44.537858Z",
+  "generated_at": "2025-09-29T19:09:14.615935Z",
   "results": [],
   "by_game_counts": {
     "PRIMITIVA": 0,
     "BONOLOTO": 0,
-    "GORDO": 0,
-    "EURO": 0
+    "EURO": 0,
+    "GORDO": 0
   },
   "meta": {
     "from_year": 2020,
-    "to_year": 2025
+    "to_year": 2025,
+    "mode": "by_dates_html_days+neighbors"
   }
 }
