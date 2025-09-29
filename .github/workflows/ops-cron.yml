@@ -27,11 +27,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Fetch LAE historic -> docs/api
-        run: |
-          python ops/scripts/fetch_lae_historic.py
+      - name: Fetch LAE historic -> docs/api (2020..hoy)
         env:
           PYTHONUNBUFFERED: "1"
+          LAE_START_YEAR: "2020"  # cambia aquí si quieres otro inicio
+          LAE_END_YEAR: ""        # vacío = año actual; pon "2024" si quieres fijar fin
+        run: |
+          python ops/scripts/fetch_lae_historic.py
 
       - name: Commit & push JSON changes
         run: |
