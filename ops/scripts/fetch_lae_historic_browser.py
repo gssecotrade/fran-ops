@@ -1,214 +1,154 @@
 # ops/scripts/fetch_lae_historic_browser.py
-# Histórico LAE 2020-hoy usando navegador real (Playwright)
-# - Carga páginas oficiales /sorteos
-# - Pulsa "Cargar más" hasta cubrir START_YEAR
-# - Parseo robusto de filas (números, complementario, reintegro, estrellas)
-import os, re, json, time, math, random
+import os, json, time, random
 from datetime import datetime, date
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 OUT_DIR = os.path.join("docs", "api")
-START_YEAR = int(os.environ.get("LAE_START_YEAR", "2020"))
-END_YEAR   = date.today().year
 
 GAMES = {
-    # key           url path                               how to parse stars/complement/reintegro
-    "PRIMITIVA": ("https://www.loteriasyapuestas.es/es/la-primitiva/sorteos", dict(has_comp=True, has_rein=True, has_stars=False)),
-    "BONOLOTO":  ("https://www.loteriasyapuestas.es/es/bonoloto/sorteos",      dict(has_comp=True, has_rein=True, has_stars=False)),
-    "GORDO":     ("https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos", dict(has_comp=False, has_rein=True, has_stars=False, has_clave=True)),
-    "EURO":      ("https://www.loteriasyapuestas.es/es/euromillones/sorteos",  dict(has_comp=False, has_rein=False, has_stars=True)),
+    "PRIMITIVA": ["LA PRIMITIVA", "PRIMITIVA", "LAPRIMITIVA"],
+    "BONOLOTO":  ["BONOLOTO"],
+    "GORDO":     ["EL GORDO DE LA PRIMITIVA", "EL GORDO", "GORDO"],
+    "EURO":      ["EUROMILLONES", "EURO MILLONES", "EURO"]
 }
 
-# Utilidades
+START_YEAR = int(os.getenv("LAE_START_YEAR", "2020"))
+END_YEAR   = date.today().year
+
+BASE = "https://www.loteriasyapuestas.es/servicios/buscadorSorteos"
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+
 def ensure_dir(p): os.makedirs(p, exist_ok=True)
 
-NUM_RE = re.compile(r"\b\d{1,2}\b")
-DATE_RE = re.compile(r"(\d{2}/\d{2}/\d{4})")
-
-def parse_row_text(game_key: str, txt: str, flags: dict):
-    """
-    txt: texto visible de una fila de la tabla (una línea por sorteo)
-    """
-    # fecha
-    m = DATE_RE.search(txt)
-    if not m:
+def normalize_draw(game_key, raw):
+    fecha = (raw.get("fecha_sorteo") or raw.get("fechaSorteo")
+             or raw.get("fecha") or "").strip()
+    if not fecha:
         return None
-    fecha = m.group(1)  # dd/MM/yyyy
 
-    # números “principales”: cogemos los primeros 6..7 números consecutivos,
-    # evitando los que van después de palabras clave (Complementario, Reintegro, Estrellas...)
-    # Estrategia simple: primero recolectamos todos los números en orden
-    nums_all = [int(x) for x in NUM_RE.findall(txt)]
-    # Luego intentamos identificar marcadores
-    comp = None
-    rein = None
-    clave = None
+    numeros = []
+    comb = (raw.get("combinacion") or raw.get("combinacionNumeros")
+            or raw.get("numeros") or raw.get("bolas") or "")
+    if isinstance(comb, str):
+        parts = [p for p in comb.replace(",", " ").replace("-", " ").split() if p.strip()]
+        for p in parts:
+            try: numeros.append(int(p))
+            except: pass
+    elif isinstance(comb, list):
+        for p in comb:
+            try: numeros.append(int(p))
+            except: pass
+
+    complementario = raw.get("complementario")
+    reintegro      = raw.get("reintegro")
+    clave          = raw.get("clave")
+    e1 = raw.get("estrella1") or raw.get("estrella_1")
+    e2 = raw.get("estrella2") or raw.get("estrella_2")
+
+    out = {"game": game_key, "date": fecha, "numbers": numeros[:6] if numeros else []}
+    if complementario is not None: out["complementario"] = complementario
+    if reintegro      is not None: out["reintegro"]      = reintegro
+    if clave          is not None: out["clave"]          = clave
+
     estrellas = []
-
-    # Heurística por palabras clave (en español en el sitio oficial)
-    # Intentamos localizar posiciones aproximadas
-    comp_pos = txt.lower().find("complement") if flags.get("has_comp") else -1
-    rein_pos = txt.lower().find("reinteg") if flags.get("has_rein") else -1
-    est_pos  = txt.lower().find("estrella") if flags.get("has_stars") else -1
-    clave_pos= txt.lower().find("clave") if flags.get("has_clave") else -1
-
-    # Números principales: Euromillones tiene 5, resto 6
-    main_count = 5 if flags.get("has_stars") else 6
-    numbers = nums_all[:main_count] if len(nums_all) >= main_count else nums_all[:]
-
-    # Extraer complementario / reintegro / estrellas / clave desde la cola
-    tail = nums_all[main_count:]
-
-    # Si hay clave (El Gordo), suele ser un número suelto
-    if flags.get("has_clave") and len(tail) > 0:
-        # lo último puede ser clave o reintegro; mantenemos orden: clave antes que reintegro
-        clave = tail[0]
-        tail = tail[1:]
-
-    if flags.get("has_comp") and len(tail) > 0:
-        comp = tail[0]
-        tail = tail[1:]
-
-    if flags.get("has_stars"):
-        # dos estrellas
-        if len(tail) >= 2:
-            estrellas = tail[:2]
-            tail = tail[2:]
-
-    if flags.get("has_rein") and len(tail) > 0:
-        rein = tail[0]
-        tail = tail[1:]
-
-    out = {
-        "game": game_key,
-        "date": fecha,
-        "numbers": numbers,
-    }
-    if comp is not None: out["complementario"] = comp
-    if rein is not None: out["reintegro"] = rein
-    if clave is not None: out["clave"] = clave
+    if e1 is not None: estrellas.append(e1)
+    if e2 is not None: estrellas.append(e2)
     if estrellas: out["estrellas"] = estrellas
+
     return out
 
-def click_load_more_until_year(page, min_year: int, max_clicks: int = 100):
-    """
-    Pulsa “Cargar más” (o similar) hasta que en la página haya sorteos <= min_year.
-    Deja de pulsar si no aparece el botón o alcanzamos max_clicks.
-    """
-    for i in range(max_clicks):
-        # ¿ya aparece un sorteo de min_year o anterior?
-        content = page.content()
-        years = re.findall(r"\b(\d{2}/\d{2}/(\d{4}))\b", content)
-        if years:
-            last_year = min(int(y[1]) for y in years)  # el más antiguo visible
-            if last_year <= min_year:
-                return
-        # intenta localizar botones típicos
-        clicked = False
-        for sel in ['text="Cargar más"', 'text="Mostrar más"', 'button:has-text("más")', 'a:has-text("más")']:
-            try:
-                page.locator(sel).first.click(timeout=1500)
-                page.wait_for_timeout(800)
-                clicked = True
-                break
-            except Exception:
-                pass
-        if not clicked:
-            # fin: no hay más
-            return
-
-def scrape_game(play, game_key: str, url: str, flags: dict):
-    draws = []
-    browser = play.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-    ctx = browser.new_context(locale="es-ES", user_agent=None)
-    page = ctx.new_page()
-    page.set_default_timeout(15000)
-
-    try:
-        page.goto(url, wait_until="networkidle")
-        # aceptar cookies si aparece
-        for sel in ['text="Aceptar"', 'text="Aceptar todo"', 'button:has-text("Aceptar")']:
-            try:
-                page.locator(sel).first.click(timeout=1500)
-                page.wait_for_timeout(300)
-                break
-            except Exception:
-                pass
-
-        click_load_more_until_year(page, START_YEAR)
-
-        # Extraer filas de la(s) tabla(s). Selección amplia:
-        rows = page.locator("table >> tbody >> tr")
-        count = rows.count()
-        if count == 0:
-            # algunos juegos muestran tarjetas; fallback: cada “sorteo” como item
-            rows = page.locator("css=section article, div[role='article'], li")
-            count = rows.count()
-
-        for i in range(count):
-            try:
-                txt = rows.nth(i).inner_text().strip()
-            except PWTimeout:
-                continue
-            if not txt:
-                continue
-            d = parse_row_text(game_key, txt, flags)
-            if not d:
-                continue
-            # filtra por rango de fechas
-            try:
-                yy = int(d["date"][-4:])
-                if yy < START_YEAR or yy > END_YEAR:
-                    continue
-            except:
-                pass
-            draws.append(d)
-
-    finally:
-        ctx.close()
-        browser.close()
-
-    # ordena por fecha asc
-    def key_dt(x):
-        try:
-            return datetime.strptime(x["date"], "%d/%m/%Y")
-        except:
-            return datetime.strptime("01/01/1900", "%d/%m/%Y")
-    draws.sort(key=key_dt)
-    return draws
-
-def latest_by_game(draws_by_game):
+def latest_by_game(draws):
+    def parse_dt(s):
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try: return datetime.strptime(s, fmt)
+            except: pass
+        return None
     res = {}
-    for g, arr in draws_by_game.items():
-        best = None
-        best_dt = None
+    for g, arr in draws.items():
+        best, best_dt = None, None
         for d in arr:
-            try:
-                dt = datetime.strptime(d["date"], "%d/%m/%Y")
-            except:
-                continue
-            if best_dt is None or dt > best_dt:
-                best_dt = dt
-                best = d
-        if best:
-            res[g] = best
+            dt = parse_dt(d["date"])
+            if dt and (best_dt is None or dt > best_dt):
+                best_dt, best = dt, d
+        if best: res[g] = best
     return res
 
 def main():
-    print(f"=== LAE · HISTÓRICO (browser) · start ===")
+    print("=== LAE · HISTÓRICO (browser) · start ===")
     print(f"[cfg] Años: {START_YEAR}..{END_YEAR}")
     ensure_dir(OUT_DIR)
-    all_draws = {k: [] for k in GAMES}
+
+    all_draws = {k: [] for k in GAMES.keys()}
 
     with sync_playwright() as p:
-        for game_key, (url, flags) in GAMES.items():
-            print(f"[run] {game_key} :: {url}")
-            try:
-                arr = scrape_game(p, game_key, url, flags)
-                all_draws[game_key] = arr
-                print(f"[ok]  {game_key} -> {len(arr)} sorteos (desde {START_YEAR})")
-            except Exception as e:
-                print(f"[err] {game_key} -> {e}")
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=UA)
+        # client HTTP que hereda cookies/UA/etc del contexto:
+        client = context.request
+
+        def retry_get(params, tries=6):
+            last = None
+            for i in range(1, tries+1):
+                try:
+                    r = client.get(BASE, params=params, timeout=30000)
+                    if r.ok:
+                        txt = r.text()
+                        if txt.strip().startswith("{"):
+                            return r.json()
+                        last = f"bad-body"
+                    else:
+                        last = f"HTTP {r.status}"
+                except Exception as e:
+                    last = str(e)
+                sleep = (2 ** (i-1)) + random.uniform(0, 0.6)
+                print(f"[retry] 403/err detected, sleeping {sleep:.1f}s (attempt {i}/{tries})")
+                time.sleep(sleep)
+            raise RuntimeError(f"Fallo GET JSON: {BASE}?{params} ({last})")
+
+        for game_key, variants in GAMES.items():
+            for year in range(START_YEAR, END_YEAR+1):
+                start = f"{year}-01-01"
+                end   = f"{year}-12-31"
+                got = False
+                for gid in variants:
+                    params = {
+                        "game_id": gid,
+                        "fechaInicioInclusiva": start,
+                        "fechaFinInclusiva": end
+                    }
+                    try:
+                        data = retry_get(params)
+                        items = (data.get("busqueda") or data.get("sorteos") or
+                                 data.get("resultados") or data.get("buscador") or [])
+                        if isinstance(items, dict):
+                            for v in items.values():
+                                if isinstance(v, list):
+                                    items = v; break
+                        if not isinstance(items, list):
+                            items = []
+
+                        parsed = []
+                        for raw in items:
+                            d = normalize_draw(game_key, raw)
+                            if d: parsed.append(d)
+
+                        if parsed:
+                            print(f"[ok] {game_key} {year} via '{gid}' -> {len(parsed)} sorteos")
+                            all_draws[game_key].extend(parsed)
+                            got = True
+                            break
+                        else:
+                            print(f"[warn] {game_key} {year} '{gid}' sin sorteos")
+                    except Exception as e:
+                        print(f"[fail] {game_key} {year} ({gid}): {e}")
+                    time.sleep(0.6 + random.uniform(0,0.4))
+                if not got:
+                    print(f"[info] {game_key} {year} → 0 sorteos (todas variantes fallaron)")
+                time.sleep(0.2 + random.uniform(0,0.3))
+
+        browser.close()
 
     payload = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -219,13 +159,10 @@ def main():
     with open(os.path.join(OUT_DIR, "lae_historico.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    for g, arr in all_draws.items():
-        with open(os.path.join(OUT_DIR, f"{g}.json"), "w", encoding="utf-8") as f:
-            json.dump({"generated_at": payload["generated_at"], "results": arr}, f, ensure_ascii=False, indent=2)
-
     latest = latest_by_game(all_draws)
     with open(os.path.join(OUT_DIR, "lae_latest.json"), "w", encoding="utf-8") as f:
-        json.dump({"generated_at": payload["generated_at"], "results": list(latest.values())}, f, ensure_ascii=False, indent=2)
+        json.dump({"generated_at": payload["generated_at"],
+                   "results": list(latest.values())}, f, ensure_ascii=False, indent=2)
 
     print("=== LAE · HISTÓRICO (browser) · done ===")
     print("by_game_counts:", payload["by_game_counts"])
