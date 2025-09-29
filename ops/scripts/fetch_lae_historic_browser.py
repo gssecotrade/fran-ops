@@ -12,13 +12,20 @@ GAMES = {
     "EURO":      ["EUROMILLONES", "EURO MILLONES", "EURO"]
 }
 
+REFERERS = {
+    "PRIMITIVA": "https://www.loteriasyapuestas.es/es/la-primitiva/sorteos",
+    "BONOLOTO":  "https://www.loteriasyapuestas.es/es/bonoloto/sorteos",
+    "GORDO":     "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos",
+    "EURO":      "https://www.loteriasyapuestas.es/es/euromillones/sorteos",
+}
+
 START_YEAR = int(os.getenv("LAE_START_YEAR", "2020"))
 END_YEAR   = date.today().year
 
 BASE = "https://www.loteriasyapuestas.es/servicios/buscadorSorteos"
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+      "KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 def ensure_dir(p): os.makedirs(p, exist_ok=True)
 
@@ -27,7 +34,6 @@ def normalize_draw(game_key, raw):
              or raw.get("fecha") or "").strip()
     if not fecha:
         return None
-
     numeros = []
     comb = (raw.get("combinacion") or raw.get("combinacionNumeros")
             or raw.get("numeros") or raw.get("bolas") or "")
@@ -41,22 +47,16 @@ def normalize_draw(game_key, raw):
             try: numeros.append(int(p))
             except: pass
 
-    complementario = raw.get("complementario")
-    reintegro      = raw.get("reintegro")
-    clave          = raw.get("clave")
+    out = {"game": game_key, "date": fecha, "numbers": numeros[:6] if numeros else []}
+    for k in ("complementario", "reintegro", "clave"):
+        if raw.get(k) is not None:
+            out[k] = raw.get(k)
     e1 = raw.get("estrella1") or raw.get("estrella_1")
     e2 = raw.get("estrella2") or raw.get("estrella_2")
-
-    out = {"game": game_key, "date": fecha, "numbers": numeros[:6] if numeros else []}
-    if complementario is not None: out["complementario"] = complementario
-    if reintegro      is not None: out["reintegro"]      = reintegro
-    if clave          is not None: out["clave"]          = clave
-
     estrellas = []
     if e1 is not None: estrellas.append(e1)
     if e2 is not None: estrellas.append(e2)
     if estrellas: out["estrellas"] = estrellas
-
     return out
 
 def latest_by_game(draws):
@@ -79,55 +79,86 @@ def main():
     print("=== LAE · HISTÓRICO (browser) · start ===")
     print(f"[cfg] Años: {START_YEAR}..{END_YEAR}")
     ensure_dir(OUT_DIR)
-
     all_draws = {k: [] for k in GAMES.keys()}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=UA)
-        # client HTTP que hereda cookies/UA/etc del contexto:
-        client = context.request
+        context = browser.new_context(
+            user_agent=UA,
+            locale="es-ES",
+            viewport={"width": 1366, "height": 900}
+        )
+        # Cabeceras globales del contexto para todas las peticiones
+        context.set_extra_http_headers({
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "es-ES,es;q=0.9,en;q=0.8",
+            "origin": "https://www.loteriasyapuestas.es",
+        })
+        client = context.request  # APIRequestContext ligado al contexto (hereda UA/cookies)
 
-        def retry_get(params, tries=6):
+        def prime_referer(ref_url: str):
+            """Carga la página del juego y acepta el banner si aparece; así fijamos cookies."""
+            page = context.new_page()
+            page.goto(ref_url, wait_until="domcontentloaded", timeout=45000)
+            # intentar aceptar consentimiento si existe
+            for sel in ('button:has-text("Aceptar")',
+                        'button:has-text("Aceptar todo")',
+                        'button[aria-label="Aceptar"]'):
+                try:
+                    page.locator(sel).first.click(timeout=2000)
+                    break
+                except:
+                    pass
+            # pequeña espera para que se persistan cookies
+            time.sleep(0.8)
+            page.close()
+
+        def retry_get(params, referer, tries=6):
             last = None
             for i in range(1, tries+1):
                 try:
-                    r = client.get(BASE, params=params, timeout=30000)
+                    r = client.get(
+                        BASE,
+                        params=params,
+                        headers={"referer": referer},
+                        timeout=30000
+                    )
                     if r.ok:
                         txt = r.text()
                         if txt.strip().startswith("{"):
                             return r.json()
-                        last = f"bad-body"
+                        last = "bad-body"
                     else:
                         last = f"HTTP {r.status}"
                 except Exception as e:
                     last = str(e)
-                sleep = (2 ** (i-1)) + random.uniform(0, 0.6)
+                # antes de reintentar, volvemos a primar referer (refresca cookies/consent)
+                prime_referer(referer)
+                sleep = (2 ** (i-1)) + random.uniform(0, 0.7)
                 print(f"[retry] 403/err detected, sleeping {sleep:.1f}s (attempt {i}/{tries})")
                 time.sleep(sleep)
             raise RuntimeError(f"Fallo GET JSON: {BASE}?{params} ({last})")
 
+        # Recorremos juegos y años
         for game_key, variants in GAMES.items():
+            referer = REFERERS[game_key]
+            prime_referer(referer)
             for year in range(START_YEAR, END_YEAR+1):
-                start = f"{year}-01-01"
-                end   = f"{year}-12-31"
+                start = f"{year}-01-01"; end = f"{year}-12-31"
                 got = False
                 for gid in variants:
-                    params = {
-                        "game_id": gid,
-                        "fechaInicioInclusiva": start,
-                        "fechaFinInclusiva": end
-                    }
+                    params = {"game_id": gid,
+                              "fechaInicioInclusiva": start,
+                              "fechaFinInclusiva": end}
                     try:
-                        data = retry_get(params)
-                        items = (data.get("busqueda") or data.get("sorteos") or
-                                 data.get("resultados") or data.get("buscador") or [])
+                        data = retry_get(params, referer)
+                        items = (data.get("busqueda") or data.get("sorteos")
+                                 or data.get("resultados") or data.get("buscador") or [])
                         if isinstance(items, dict):
                             for v in items.values():
                                 if isinstance(v, list):
                                     items = v; break
-                        if not isinstance(items, list):
-                            items = []
+                        if not isinstance(items, list): items = []
 
                         parsed = []
                         for raw in items:
@@ -140,14 +171,13 @@ def main():
                             got = True
                             break
                         else:
-                            print(f"[warn] {game_key} {year} '{gid}' sin sorteos")
+                            print(f"[warn] {game_key} {year} '{gid}' sin sorteos (lista vacía)")
                     except Exception as e:
                         print(f"[fail] {game_key} {year} ({gid}): {e}")
-                    time.sleep(0.6 + random.uniform(0,0.4))
+                    time.sleep(0.5 + random.uniform(0, 0.5))
                 if not got:
                     print(f"[info] {game_key} {year} → 0 sorteos (todas variantes fallaron)")
-                time.sleep(0.2 + random.uniform(0,0.3))
-
+                time.sleep(0.2 + random.uniform(0, 0.3))
         browser.close()
 
     payload = {
@@ -155,7 +185,6 @@ def main():
         "results": sum(all_draws.values(), []),
         "by_game_counts": {k: len(v) for k, v in all_draws.items()},
     }
-
     with open(os.path.join(OUT_DIR, "lae_historico.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
