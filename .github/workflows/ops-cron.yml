@@ -39,12 +39,12 @@ jobs:
       # ─────────────────────────────────────────────────────────────
       # LATEST de todas las loterías (producción diaria)
       # ─────────────────────────────────────────────────────────────
-      - name: Fetch LAE latest (all games) via xvfb
+      - name: Fetch LAE latest (all games)
         env:
           PYTHONUNBUFFERED: "1"
+          HEADLESS: "true"
         run: |
-          xvfb-run -a python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
-
+          python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
 
 
       # Fallback específico para Bonoloto (si latest aún no cambió)
