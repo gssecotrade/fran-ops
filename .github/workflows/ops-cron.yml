@@ -42,8 +42,10 @@ jobs:
       - name: Fetch LAE latest (all games)
         env:
           PYTHONUNBUFFERED: "1"
+          HEADLESS: "true"          # <- fuerza Playwright en headless
         run: |
           python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
+
 
       # Fallback específico para Bonoloto (si latest aún no cambió)
       - name: Fallback Bonoloto (ayer)
