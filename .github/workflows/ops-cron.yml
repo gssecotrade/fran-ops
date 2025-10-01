@@ -27,41 +27,33 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Dependencias básicas del proyecto
+      # Dependencias del proyecto (ajusta si necesitas más)
       - name: Install deps (project)
         run: |
           python -m pip install --upgrade pip
           pip install -r ops/scripts/requirements.txt
-
-      # Playwright SOLO lo necesitamos para el spider histórico; lo instalamos siempre
-      # para no depender de condiciones, pero el paso spider solo corre en manual.
-      - name: Install deps (Playwright)
-        run: |
+          # Playwright solo es necesario para el spider histórico
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      # ───────────────────────────────────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────
       # LATEST de todas las loterías (producción diaria)
-      # ───────────────────────────────────────────────────────────────────────────
-      - name: Fetch LAE latest (todas)
+      # ─────────────────────────────────────────────────────────────
+      - name: Fetch LAE latest (all games)
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
 
-      # Fallback específico para Bonoloto (si LAE aún no publicó el latest a esta hora)
+      # Fallback específico para Bonoloto (si latest aún no cambió)
       - name: Fallback Bonoloto (ayer)
         continue-on-error: true
         env:
           PYTHONUNBUFFERED: "1"
         run: |
-          python ops/scripts/fetch_lae_results.py --game bonoloto --date "$(python - <<'PY'
-from datetime import date, timedelta
-print((date.today() - timedelta(days=1)).isoformat())
-PY
-)"
+          python ops/scripts/fetch_lae_results.py --game bonoloto --date "$(python -c 'from datetime import date,timedelta;print((date.today()-timedelta(days=1)).isoformat())')"
 
-      # Publica cambios JSON de latest
+      # Publica los JSON de latest si hubo cambios
       - name: Commit & push JSON changes (latest)
         run: |
           set -e
@@ -75,10 +67,10 @@ PY
             echo "No JSON changes (latest)."
           fi
 
-      # ───────────────────────────────────────────────────────────────────────────
+      # ─────────────────────────────────────────────────────────────
       # HISTÓRICO (spider) — SOLO en ejecuciones manuales
-      # Evita 403 de LAE en los runs programados
-      # ───────────────────────────────────────────────────────────────────────────
+      # Evita 403 en runs programados
+      # ─────────────────────────────────────────────────────────────
       - name: Fetch LAE historic (spider) -> docs/api
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
