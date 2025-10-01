@@ -3,7 +3,7 @@ name: build-and-publish-json
 on:
   workflow_dispatch: {}
   schedule:
-    # Ejecuta cada día a las 05:05 UTC
+    # Diario a las 05:05 UTC (07:05 Madrid en verano)
     - cron: "5 5 * * *"
 
 permissions:
@@ -27,13 +27,58 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (Playwright)
+      # Dependencias básicas del proyecto
+      - name: Install deps (project)
         run: |
           python -m pip install --upgrade pip
+          pip install -r ops/scripts/requirements.txt
+
+      # Playwright SOLO lo necesitamos para el spider histórico; lo instalamos siempre
+      # para no depender de condiciones, pero el paso spider solo corre en manual.
+      - name: Install deps (Playwright)
+        run: |
           pip install playwright
           python -m playwright install --with-deps chromium
 
-            # ── HISTÓRICO (spider): solo cuando lo lanzas a mano ──────────────────────
+      # ───────────────────────────────────────────────────────────────────────────
+      # LATEST de todas las loterías (producción diaria)
+      # ───────────────────────────────────────────────────────────────────────────
+      - name: Fetch LAE latest (todas)
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
+
+      # Fallback específico para Bonoloto (si LAE aún no publicó el latest a esta hora)
+      - name: Fallback Bonoloto (ayer)
+        continue-on-error: true
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python ops/scripts/fetch_lae_results.py --game bonoloto --date "$(python - <<'PY'
+from datetime import date, timedelta
+print((date.today() - timedelta(days=1)).isoformat())
+PY
+)"
+
+      # Publica cambios JSON de latest
+      - name: Commit & push JSON changes (latest)
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/api/*.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "data: update LAE latest (all games)"
+            git push
+          else
+            echo "No JSON changes (latest)."
+          fi
+
+      # ───────────────────────────────────────────────────────────────────────────
+      # HISTÓRICO (spider) — SOLO en ejecuciones manuales
+      # Evita 403 de LAE en los runs programados
+      # ───────────────────────────────────────────────────────────────────────────
       - name: Fetch LAE historic (spider) -> docs/api
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -52,6 +97,5 @@ jobs:
             git commit -m "data: update LAE historico [spider]"
             git push
           else
-            echo "No JSON changes."
+            echo "No JSON changes (spider)."
           fi
-
