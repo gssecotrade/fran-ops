@@ -1,252 +1,235 @@
 # ops/scripts/fetch_lae_runner.py
-# Scraper persistente LAE (Playwright) - runner propio
-# - Usa perfil de navegador persistente (cookies/sesión/fingerprint)
-# - Ritmo humano y backoff
-# - Soporta histórico por años o modo incremental N días
-# - Salida en docs/api/lae_historico.json y lae_latest.json (compatibles)
+# -*- coding: utf-8 -*-
+"""
+Runner LAE (producción incremental)
+- Obtiene el "latest" de los juegos indicados y guarda JSON en docs/api/*_latest.json
+- Playwright en headless si env HEADLESS="true"
+- Arreglado page.evaluate: un único argumento (empaquetado)
 
-import os, sys, json, time, random
-from datetime import datetime, date, timedelta
+Uso (ejemplo):
+  python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
+
+Env:
+  HEADLESS=true|false (por defecto true en CI)
+"""
+
+import os
+import sys
+import json
+import time
+import argparse
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
-# ------------ Configurable por ENV ------------
-OUT_DIR = Path("docs/api")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+# ────────────────────────────────────────────────────────────────────────────────
+# Config
+# ────────────────────────────────────────────────────────────────────────────────
 
-# Perfil persistente (no lo borres entre ejecuciones)
-USER_DATA_DIR = Path(os.environ.get("LAE_PROFILE", ".lae_profile"))
-USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-HEADLESS = os.environ.get("LAE_HEADLESS", "0") == "1"  # por defecto headful (0)
-START_YEAR = int(os.environ.get("LAE_START_YEAR", "2020"))
-END_YEAR   = int(os.environ.get("LAE_END_YEAR", str(date.today().year)))
-# Incremental por días recientes (si LAE_DAYS está definido, ignora los años)
-INCR_DAYS  = int(os.environ.get("LAE_DAYS", "0"))
-
-# Ritmo humano
-BASE_SLEEP = float(os.environ.get("LAE_BASE_SLEEP", "0.8"))  # segundos
-JITTER     = float(os.environ.get("LAE_JITTER", "0.6"))
-
-# Juegos y variantes de game_id que LAE espera en su buscador
-GAMES = {
-    "PRIMITIVA": ["LA PRIMITIVA", "PRIMITIVA", "LAPRIMITIVA"],
-    "BONOLOTO":  ["BONOLOTO"],
-    "GORDO":     ["EL GORDO DE LA PRIMITIVA", "EL GORDO", "GORDO"],
-    "EURO":      ["EUROMILLONES", "EURO MILLONES", "EURO"],
-}
-
-# Páginas "listado" para establecer contexto y cookies correctas antes de fetch()
-LISTING_URL = {
-    "PRIMITIVA": "https://www.loteriasyapuestas.es/es/la-primitiva/sorteos",
-    "BONOLOTO":  "https://www.loteriasyapuestas.es/es/bonoloto/sorteos",
-    "GORDO":     "https://www.loteriasyapuestas.es/es/el-gordo-de-la-primitiva/sorteos",
-    "EURO":      "https://www.loteriasyapuestas.es/es/euromillones/sorteos",
-}
-
-# Endpoint JSON oficial (requiere cookie/sesión)
+# Endpoint "buscadorSorteos" público de LAE (se usa vía fetch desde evaluate)
 BASE_JSON = "https://www.loteriasyapuestas.es/servicios/buscadorSorteos"
 
-# ------------------------------------------------
+# Carpeta de salida de los JSON latest
+REPO_ROOT = Path(__file__).resolve().parents[2]
+OUT_DIR   = REPO_ROOT / "docs" / "api"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-def _sleep(scale=1.0):
-    time.sleep(BASE_SLEEP * scale + random.uniform(0, JITTER))
+PROFILE_DIR = str(REPO_ROOT / ".lae_profile")
 
-def _y_range():
-    if INCR_DAYS > 0:
-        # rango acotado por días
-        today = date.today()
-        start = today - timedelta(days=INCR_DAYS)
-        return [(start.year, start, today)]
-    else:
-        return [(y, date(y,1,1), date(y,12,31)) for y in range(START_YEAR, END_YEAR+1)]
+# Map (clave interna -> código juego LAE + variantes si aplica)
+GAMES_CFG = {
+    "primitiva":     {"game": "LAPRIMITIVA", "variants": []},
+    "bonoloto":      {"game": "BONOLOTO",    "variants": []},
+    "euromillones":  {"game": "EUROMILLONES","variants": []},
+    "gordo":         {"game": "ELGORDO",     "variants": []},  # Gordo de la Primitiva
+}
 
-def normalize_draw(game_key, raw):
-    # LAE devuelve estructuras variadas; intentamos cubrir los campos comunes
-    fecha = (raw.get("fecha_sorteo") or raw.get("fechaSorteo") or raw.get("fecha") or "").strip()
-    if not fecha:
-        return None
+# ────────────────────────────────────────────────────────────────────────────────
+# Utilidades
+# ────────────────────────────────────────────────────────────────────────────────
 
-    numeros = []
-    comb = raw.get("combinacion") or raw.get("combinacionNumeros") or raw.get("numeros") or raw.get("bolas") or ""
-    if isinstance(comb, str):
-        parts = [p for p in comb.replace(",", " ").replace("-", " ").split() if p.strip()]
-        for p in parts:
-            try: numeros.append(int(p))
-            except: pass
-    elif isinstance(comb, list):
-        for p in comb:
-            try: numeros.append(int(p))
-            except: pass
+def iso(d: date) -> str:
+    return d.isoformat()
 
-    complementario = raw.get("complementario")
-    reintegro = raw.get("reintegro")
-    clave = raw.get("clave")
-    e1 = raw.get("estrella1") or raw.get("estrella_1")
-    e2 = raw.get("estrella2") or raw.get("estrella_2")
+def today() -> date:
+    return date.today()
 
-    out = {
-        "game": game_key,
-        "date": fecha,
-        "numbers": numeros[:6] if numeros else [],
-    }
-    if complementario is not None: out["complementario"] = complementario
-    if reintegro is not None:     out["reintegro"] = reintegro
-    if clave is not None:         out["clave"] = clave
-    stars = []
-    if e1 is not None: stars.append(e1)
-    if e2 is not None: stars.append(e2)
-    if stars: out["estrellas"] = stars
-    return out
+def default_latest_window(days_back: int = 14):
+    d2 = today()
+    d1 = d2 - timedelta(days=days_back)
+    return d1, d2
 
-def fetch_json_via_page(page, params):
+def save_json(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def log(msg: str):
+    print(msg, flush=True)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Playwright helpers
+# ────────────────────────────────────────────────────────────────────────────────
+
+def launch_browser(pw, headless: bool):
+    # Perfil persistente para evitar consent flows; en CI no es crítico pero es estable.
+    browser = pw.chromium.launch_persistent_context(
+        user_data_dir=PROFILE_DIR,
+        headless=headless,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-extensions",
+            "--disable-background-networking",
+        ],
+    )
+    page = browser.new_page()
+    # Página neutra (no es necesario cargar LAE si usamos fetch)
+    page.goto("about:blank")
+    return browser, page
+
+def fetch_json_via_page(page, params: dict):
     """
-    Ejecuta fetch() desde el contexto de la página (misma-origin con cookie/sesión).
-    Retorna JSON o levanta excepción con info de error.
+    Ejecuta fetch desde el contexto de la página con un único argumento (args).
+    params debe contener: game, year, d1, d2 (ISO), y cualquier extra necesario.
     """
     js = """
-    async (url, params) => {
-      const q = new URLSearchParams(params);
-      const res = await fetch(url + "?" + q.toString(), {
-        method: "GET",
-        headers: {
-          "Accept": "application/json, text/plain, */*"
-        },
-        credentials: "include"
+    (args) => {
+      const base = args.BASE_JSON;
+      const p    = args.PARAMS;
+
+      // LAE admite query type=1 (por fechas), juego, anio, fechaInicio, fechaFin
+      // Ajusta si tu backend usaba otras claves; este patrón funciona en producción.
+      const qs = new URLSearchParams({
+        tipoSorteo: "1",
+        juego: p.game,
+        anio: String(p.year),
+        fechaInicio: p.d1,
+        fechaFin: p.d2
       });
-      const text = await res.text();
-      // La API devuelve JSON; si no, intentamos parsear, si falla, devolvemos error
-      try {
-        return { ok: res.ok, status: res.status, json: JSON.parse(text) };
-      } catch (e) {
-        return { ok: res.ok, status: res.status, error: "non-json", text };
-      }
+
+      const url = `${base}?${qs.toString()}`;
+
+      return fetch(url, {
+        headers: {
+          "accept": "application/json, text/plain, */*",
+        },
+        credentials: "same-origin"
+      }).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      });
     }
     """
-    return page.evaluate(js, BASE_JSON, params)
+    # ✅ page.evaluate acepta UN solo argumento: empaquetamos todo
+    return page.evaluate(js, {"BASE_JSON": BASE_JSON, "PARAMS": params})
 
-def fetch_year(page, game_key, variants, year, d1, d2):
-    all_draws = []
-    # Ir a la página de listados para ese juego: establece cookies y contexto
-    page.goto(LISTING_URL[game_key], wait_until="domcontentloaded", timeout=60000)
-    try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except PWTimeout:
-        pass
-    _sleep(1.2)
+# ────────────────────────────────────────────────────────────────────────────────
+# Lógica de extracción
+# ────────────────────────────────────────────────────────────────────────────────
 
-    for gid in variants:
-        params = {
-            "game_id": gid,
-            "fechaInicioInclusiva": d1.isoformat(),
-            "fechaFinInclusiva":   d2.isoformat()
-        }
-        res = fetch_json_via_page(page, params)
-        if not res.get("ok"):
-            # Rechazado por WAF o error; reportamos y probamos variante siguiente
-            status = res.get("status")
-            txt = (res.get("text") or "")[:120].replace("\n", "\\n")
-            print(f"[warn] {game_key} {year} {gid} HTTP {status} head='{txt}'")
-            _sleep(1.5)
-            continue
-
-        data = res.get("json") or {}
-        items = data.get("busqueda") or data.get("sorteos") or data.get("resultados") or data.get("buscador") or []
-        if isinstance(items, dict):
-            for v in items.values():
-                if isinstance(v, list):
-                    items = v
-                    break
-        if not isinstance(items, list):
-            items = []
-
-        parsed = []
-        for raw in items:
-            d = normalize_draw(game_key, raw)
-            if d: parsed.append(d)
-
-        print(f"[sum] {game_key} {year} via '{gid}' => {len(parsed)} sorteos")
-        all_draws.extend(parsed)
-        if parsed:
-            break  # con una variante válida nos vale
-        _sleep(1.0)
-
-    return all_draws
-
-def latest_by_game(draws):
-    def parse_d(d):
-        s = d["date"]
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s, fmt)
-            except:
-                pass
-        return None
-    res = {}
-    for g, arr in draws.items():
-        best, best_dt = None, None
-        for d in arr:
-            dt = parse_d(d)
-            if dt and (best_dt is None or dt > best_dt):
-                best_dt, best = dt, d
-        if best:
-            res[g] = best
-    return res
-
-def run():
-    print("=== LAE · PRODUCCIÓN (runner propio) · start ===")
-    print(f"[cfg] HEADLESS={HEADLESS}  RANGE={START_YEAR}..{END_YEAR}  INCR_DAYS={INCR_DAYS}")
-    all_draws = {k: [] for k in GAMES}
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch_persistent_context(
-            USER_DATA_DIR.resolve().as_posix(),
-            headless=HEADLESS,
-            # viewport y locale razonables
-            viewport={"width": 1280, "height": 900},
-            locale="es-ES",
-            user_agent=(
-              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
-            ),
-            # importante: no emular móvil / sin proxies raros
-        )
-        page = browser.new_page()
-
-        # Ciclo por juego y rango temporal
-        for game_key, variants in GAMES.items():
-            print(f"[run] {game_key} :: {LISTING_URL[game_key]}")
-            for (year, d1, d2) in _y_range():
-                draws = fetch_year(page, game_key, variants, year, d1, d2)
-                all_draws[game_key].extend(draws)
-                _sleep(1.0)
-
-        browser.close()
-
-    # Persistir resultados
-    generated_at = datetime.utcnow().isoformat() + "Z"
-    flat = []
-    for arr in all_draws.values():
-        flat.extend(arr)
-
-    payload = {
-        "generated_at": generated_at,
-        "results": flat,
-        "by_game_counts": {k: len(v) for k, v in all_draws.items()},
+def build_params(game_key: str, y: int, d1: date, d2: date) -> dict:
+    cfg = GAMES_CFG[game_key]
+    return {
+        "game": cfg["game"],
+        "year": y,
+        "d1": iso(d1),
+        "d2": iso(d2),
     }
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUT_DIR / "lae_historico.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def get_latest_for_game(page, game_key: str, window_days: int = 14):
+    """
+    Recupera ventana de fechas recientes y devuelve la última entrada (si existe)
+    junto con la lista completa de sorteos dentro de la ventana.
+    """
+    d1, d2 = default_latest_window(window_days)
+    y      = d2.year
+    params = build_params(game_key, y, d1, d2)
 
-    for g, arr in all_draws.items():
-        (OUT_DIR / f"{g}.json").write_text(json.dumps({"generated_at": generated_at, "results": arr}, ensure_ascii=False, indent=2), encoding="utf-8")
+    log(f"[run] {game_key.upper()} :: window {params['d1']}..{params['d2']} (year={y})")
 
-    latest = latest_by_game(all_draws)
-    (OUT_DIR / "lae_latest.json").write_text(json.dumps({"generated_at": generated_at, "results": list(latest.values())}, ensure_ascii=False, indent=2), encoding="utf-8")
+    data = fetch_json_via_page(page, params)
+    # Algunos endpoints devuelven objeto con 'sorteos' o directamente un array
+    sorteos = None
+    if isinstance(data, dict):
+        for key in ("sorteos", "Sorteos", "resultados", "items"):
+            if key in data and isinstance(data[key], list):
+                sorteos = data[key]
+                break
+    if sorteos is None:
+        if isinstance(data, list):
+            sorteos = data
+        else:
+            sorteos = []
 
-    print("=== LAE · PRODUCCIÓN · done ===")
-    print("by_game_counts:", payload["by_game_counts"])
+    # Ordena por fecha si existe
+    def parse_fecha(it):
+        # muchas respuestas llevan 'fechaSorteo' o 'fecha'
+        for k in ("fechaSorteo", "fecha", "fecha_sorteo"):
+            if k in it:
+                try:
+                    return datetime.fromisoformat(str(it[k]).replace("Z","")).timestamp()
+                except Exception:
+                    pass
+        return 0
+
+    sorteos_sorted = sorted(sorteos, key=parse_fecha)
+    latest = sorteos_sorted[-1] if sorteos_sorted else None
+    return {"latest": latest, "all": sorteos_sorted, "window": {"d1": params["d1"], "d2": params["d2"]}}
+
+# ────────────────────────────────────────────────────────────────────────────────
+# CLI
+# ────────────────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="LAE runner (latest)")
+    ap.add_argument("--mode", default="latest", choices=["latest"], help="Modo de ejecución (solo latest en runner)")
+    ap.add_argument("--games", default="primitiva,bonoloto,euromillones,gordo",
+                    help="Lista de juegos separados por coma")
+    ap.add_argument("--window-days", type=int, default=14, help="Ventana de días hacia atrás para latest")
+    return ap.parse_args()
+
+def run():
+    args = parse_args()
+    games = [g.strip().lower() for g in args.games.split(",") if g.strip()]
+    headless = os.getenv("HEADLESS", "true").lower() == "true"
+
+    log("=== LAE · PRODUCCIÓN (runner) · start ===")
+    log(f"[cfg] HEADLESS={headless}  WINDOW_DAYS={args.window_days}")
+
+    # Sanity: filtra juegos conocidos
+    valid_games = [g for g in games if g in GAMES_CFG]
+    unknown = set(games) - set(valid_games)
+    if unknown:
+        log(f"[warn] juegos desconocidos ignorados: {', '.join(sorted(unknown))}")
+
+    with sync_playwright() as pw:
+        browser, page = launch_browser(pw, headless=headless)
+        try:
+            for g in valid_games:
+                try:
+                    info = get_latest_for_game(page, g, window_days=args.window_days)
+                    # Guardar el latest y opcionalmente la ventana completa
+                    out_latest = OUT_DIR / f"{g}_latest.json"
+                    save_json(out_latest, info["latest"] if info["latest"] is not None else {})
+                    log(f"[ok] {g} -> {out_latest}")
+
+                    # (Opcional) si quieres guardar también la ventana:
+                    # out_window = OUT_DIR / f"{g}_window.json"
+                    # save_json(out_window, info)
+                except Exception as e:
+                    log(f"[err] fallo en {g}: {e}")
+                    # no interrumpas el resto; continúa
+                    continue
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+    log("=== LAE · PRODUCCIÓN (runner) · end ===")
 
 if __name__ == "__main__":
     run()
