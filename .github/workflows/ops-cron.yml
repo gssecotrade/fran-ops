@@ -3,8 +3,7 @@ name: lae-latest-daily
 on:
   workflow_dispatch: {}
   schedule:
-    # Diario a las 05:05 UTC (07:05 Madrid en verano)
-    - cron: "5 5 * * *"
+    - cron: "5 5 * * *"   # 05:05 UTC diario
 
 permissions:
   contents: write
@@ -17,11 +16,9 @@ jobs:
   latest:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     env:
       PYTHONUNBUFFERED: "1"
       HEADLESS: "true"
-      # Estos dos pueden faltar; el fallback se saltará si están vacíos
       CONTROL_SHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
       GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
 
@@ -42,7 +39,7 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      # ── LATEST (HTTP-only) de todas las loterías ───────────────────────────────
+      # LATEST (HTTP-only) → genera docs/api/*_latest.json
       - name: Fetch LAE latest (all games)
         run: |
           python ops/scripts/fetch_lae_runner.py --mode latest --games "primitiva,bonoloto,euromillones,gordo"
@@ -60,7 +57,7 @@ jobs:
             echo "No JSON changes (latest)."
           fi
 
-      # ── Fallback Bonoloto (opcional, solo si hay secret de SA) ────────────────
+      # Fallback opcional Bonoloto (solo si existen los secrets; no rompe si faltan)
       - name: Fallback Bonoloto (ayer) — opcional
         continue-on-error: true
         shell: bash
@@ -75,5 +72,3 @@ from datetime import date, timedelta
 print((date.today()-timedelta(days=1)).isoformat())
 PY
           )"
-
-      # ── IMPORTANTE: sin spider histórico en cron (403 en runners públicos) ────
