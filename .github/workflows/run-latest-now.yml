@@ -1,9 +1,8 @@
 name: run-latest-now
-
-on:
-  workflow_dispatch: {}          # ← Botón "Run workflow"
+'on':
+  workflow_dispatch: {}
   schedule:
-    - cron: "5 5 * * *"          # 05:05 UTC diario
+    - cron: "5 5 * * *"   # 05:05 UTC diario
 
 permissions:
   contents: write
