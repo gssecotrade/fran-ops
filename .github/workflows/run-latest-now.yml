@@ -20,8 +20,7 @@ jobs:
       HEADLESS: "true"
       CONTROL_SHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
       GOOGLE_SA_JSON_BASE64: ${{ secrets.GOOGLE_SA_JSON_BASE64 }}
-
-    steps:
+steps:
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -64,8 +63,5 @@ jobs:
             exit 0
           fi
           python ops/scripts/fetch_lae_results.py --game bonoloto --date "$(
-            python - <<'PY'
-from datetime import date, timedelta
-print((date.today()-timedelta(days=1)).isoformat())
-PY
+            python -c 'from datetime import date, timedelta; print((date.today()-timedelta(days=1)).isoformat())'
           )"
